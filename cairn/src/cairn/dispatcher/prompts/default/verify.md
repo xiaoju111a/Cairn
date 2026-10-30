@@ -20,6 +20,7 @@ If the candidate is disproved or too weak to use as an objective fact:
 - Prefer reproducible commands, protocol responses, file contents, authoritative references, or goal artifacts.
 - Do not claim success merely because a tool ran without error.
 - Keep evidence summaries concise and store long output in an artifact file.
+- Use focused checks and avoid repeating a failed check without a new reason. Aim to finish within 20 tool calls; if direct evidence remains insufficient, return a rejected verdict with a clear summary.
 
 # Context
 ## Graph

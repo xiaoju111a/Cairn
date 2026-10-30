@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import yaml
 
-from cairn.dispatcher.tasks.common import write_explore_graph_reference
+from cairn.dispatcher.tasks.common import write_focused_graph_reference
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
@@ -33,7 +33,7 @@ def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
     containers = FakeContainerManager()
     driver = FakeDriver()
     lease = FakeLease()
-    graph_yaml = "project:\n  title: huge\n" + ("x" * 100_000)
+    graph_yaml = yaml.safe_dump({"project": {"title": "huge"}, "facts": [{"id": "f001", "description": "x" * 100_000}]})
 
     monkeypatch.setattr(reason, "get_driver", lambda *_a, **_k: driver)
     monkeypatch.setattr(reason.HeartbeatLease, "for_reason", _lease_factory(lease))
@@ -61,14 +61,15 @@ def test_reason_writes_graph_snapshot_and_creates_intent(monkeypatch) -> None:
     assert client.created_intents == [("proj_001", ["f001"], "next step", "test-worker")]
     assert client.released_reasons == [("proj_001", "test-worker")]
     assert lease.started and lease.stopped
-    assert len(containers.writes) == 1
+    assert len(containers.writes) == 3
     container_name, path, content = containers.writes[0]
     assert container_name == "container-proj_001"
     assert path.startswith("/tmp/cairn-prompts/reason_execute-")
     assert path.endswith("/graph.yaml")
-    assert content == graph_yaml
+    assert content == graph_yaml.strip()
     assert graph_yaml not in driver.execute_prompts[0]
-    assert path in driver.execute_prompts[0]
+    assert containers.writes[-1][1].endswith("/overview.yaml")
+    assert containers.writes[-1][1] in driver.execute_prompts[0]
 
 
 def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> None:
@@ -125,7 +126,7 @@ def test_explore_graph_overview_keeps_full_records_available() -> None:
     }
     full_yaml = yaml.safe_dump(graph)
 
-    reference = write_explore_graph_reference(
+    reference = write_focused_graph_reference(
         containers, "worker", full_yaml, phase="explore_execute", source_fact_ids=["source"]
     )
 
@@ -261,6 +262,10 @@ def test_verify_task_writes_independent_verdict_with_evidence(monkeypatch) -> No
             [{"kind": "observation", "summary": "same result"}],
         )
     ]
+    assert len(containers.writes) == 2
+    assert containers.writes[-1][1].endswith("/overview.yaml")
+    assert containers.writes[-1][1] in driver.execute_prompts[0]
+    assert '"candidate result"' in driver.execute_prompts[0]
     assert lease.started and lease.stopped
 
 

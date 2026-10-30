@@ -29,6 +29,7 @@ from cairn.server.models import Fact, Intent, ProjectDetail, ProjectSummary
 LOG = logging.getLogger(__name__)
 UNHEALTHY_RETRY_AFTER_SECONDS = 5
 REJECTED_RETRY_AFTER_SECONDS = 5
+FAILED_RETRY_AFTER_SECONDS = 120
 BOOTSTRAP_INTENT_DESCRIPTION = "bootstrap"
 BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
 VERIFY_INTENT_CREATOR = "dispatcher.verify"
@@ -939,14 +940,17 @@ class DispatcherLoop:
                 else:
                     self.worker_unhealthy_until.pop(task.worker_name, None)
                 rejection_key = (task.project_id, task.task_type, task.worker_name)
-                if outcome == "rejected":
-                    retry_after_seconds = REJECTED_RETRY_AFTER_SECONDS
+                if outcome in ("rejected", "failed"):
+                    retry_after_seconds = (
+                        FAILED_RETRY_AFTER_SECONDS if outcome == "failed" else REJECTED_RETRY_AFTER_SECONDS
+                    )
                     self.worker_rejected_until[rejection_key] = time.time() + retry_after_seconds
                     LOG.info(
-                        "worker marked rejected project=%s task=%s worker=%s retry_after=%.0fs",
+                        "worker retry delayed project=%s task=%s worker=%s outcome=%s retry_after=%.0fs",
                         task.project_id,
                         task.task_type,
                         task.worker_name,
+                        outcome,
                         retry_after_seconds,
                     )
                 else:

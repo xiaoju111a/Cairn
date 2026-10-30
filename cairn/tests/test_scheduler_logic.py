@@ -329,6 +329,22 @@ def test_select_worker_reports_busy_unhealthy_rejected_and_unsupported_workers(m
     assert selection.blocked_task_type == ["unsupported"]
 
 
+def test_failed_task_waits_before_retrying_same_worker(monkeypatch) -> None:
+    loop = _loop()
+    loop.config = make_config()
+    future: Future[str] = Future()
+    future.set_result("failed")
+    worker = loop.config.workers[0]
+    loop.futures = {future: RunningTask("proj", "reason", worker.name, TaskCancellation())}
+    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.time.time", lambda: 100.0)
+
+    loop._reap_futures()
+    selection = loop._select_worker("proj", "reason")
+
+    assert selection.worker is None
+    assert selection.blocked_rejected == [f"{worker.name}(120.0s)"]
+
+
 def test_disabled_worker_healthcheck_skips_automatic_startup_but_force_runs_diagnostic() -> None:
     loop = _loop()
     config = make_config()

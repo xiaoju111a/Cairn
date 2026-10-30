@@ -73,7 +73,7 @@ def write_graph_snapshot_reference(
     )
 
 
-def write_explore_graph_reference(
+def write_focused_graph_reference(
     container_manager: ContainerManager,
     container_name: str,
     graph_yaml: str,
@@ -81,7 +81,7 @@ def write_explore_graph_reference(
     phase: str,
     source_fact_ids: list[str],
 ) -> str:
-    """Give Explore a small graph index while retaining complete records on disk."""
+    """Give a task a small graph index while retaining complete records on disk."""
     try:
         graph = yaml.safe_load(graph_yaml)
     except yaml.YAMLError:

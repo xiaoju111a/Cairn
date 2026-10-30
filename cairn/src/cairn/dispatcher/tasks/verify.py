@@ -18,7 +18,7 @@ from cairn.dispatcher.tasks.common import (
     preview,
     run_worker_process,
     task_healthcheck_enabled,
-    write_graph_snapshot_reference,
+    write_focused_graph_reference,
 )
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import Fact, Intent, ProjectDetail
@@ -61,11 +61,12 @@ def run_verify_task(
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "verify.md"),
             {
-                "graph_yaml": write_graph_snapshot_reference(
+                "graph_yaml": write_focused_graph_reference(
                     container_manager,
                     container_name,
                     export_yaml.strip(),
                     phase="verify",
+                    source_fact_ids=[fact.id, *intent.from_],
                 ),
                 "fact_id": fact.id,
                 "fact_json": json.dumps(fact.model_dump(mode="json"), ensure_ascii=False),

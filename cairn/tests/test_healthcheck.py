@@ -82,6 +82,7 @@ def test_claudecode_check_health_hits_messages_with_bearer(monkeypatch) -> None:
     assert captured["url"] == "http://api/v1/messages"
     assert captured["headers"]["Authorization"] == "Bearer tok"
     assert captured["json"]["model"] == "m"
+    assert captured["json"]["messages"] == [{"role": "user", "content": "Reply with OK."}]
     assert captured["timeout"] == 7
 
 

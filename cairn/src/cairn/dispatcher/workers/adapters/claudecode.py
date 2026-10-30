@@ -26,7 +26,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
             json_body={
                 "model": env["ANTHROPIC_MODEL"],
                 "max_tokens": 10,
-                "messages": [{"role": "user", "content": "ping"}],
+                "messages": [{"role": "user", "content": "Reply with OK."}],
             },
             timeout=timeout,
             proxies=proxies_from_env(env),

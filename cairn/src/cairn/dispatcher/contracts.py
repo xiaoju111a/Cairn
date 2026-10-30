@@ -56,7 +56,91 @@ def _looks_like_bootstrap_conclude_data(payload: dict[str, Any]) -> bool:
 
 
 def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
-    return isinstance(payload, dict) and set(payload) == {"description"}
+    return isinstance(payload, dict) and (
+        set(payload) == {"description"} or "finding" in payload
+    )
+
+
+def _validate_evidence(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("evidence must be an array")
+    result = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            raise ValueError(f"evidence[{index}] must be an object")
+        kind = entry.get("kind")
+        summary = entry.get("summary")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError(f"evidence[{index}].kind is required")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError(f"evidence[{index}].summary is required")
+        normalized = {"kind": kind.strip(), "summary": summary.strip()}
+        for key in ("artifact_path", "source_url"):
+            item = entry.get(key)
+            if item is not None:
+                if not isinstance(item, str) or not item.strip():
+                    raise ValueError(f"evidence[{index}].{key} must be a non-empty string")
+                normalized[key] = item.strip()
+        result.append(normalized)
+    return result
+
+
+def _validate_attempts(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("attempts must be an array")
+    result = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            raise ValueError(f"attempts[{index}] must be an object")
+        action = entry.get("action")
+        outcome = entry.get("outcome")
+        summary = entry.get("summary")
+        if not isinstance(action, str) or not action.strip():
+            raise ValueError(f"attempts[{index}].action is required")
+        if outcome not in {"success", "failed", "inconclusive"}:
+            raise ValueError(f"attempts[{index}].outcome is invalid")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError(f"attempts[{index}].summary is required")
+        normalized = {
+            "action": action.strip(),
+            "outcome": outcome,
+            "summary": summary.strip(),
+        }
+        artifact_path = entry.get("artifact_path")
+        if artifact_path is not None:
+            if not isinstance(artifact_path, str) or not artifact_path.strip():
+                raise ValueError(f"attempts[{index}].artifact_path must be a non-empty string")
+            normalized["artifact_path"] = artifact_path.strip()
+        result.append(normalized)
+    return result
+
+
+def _validate_finding(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("finding must be an object")
+    description = value.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("finding.description is required")
+    result: dict[str, Any] = {"description": description.strip()}
+    for key in ("category", "target", "component", "version"):
+        item = value.get(key)
+        if item is not None:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(f"finding.{key} must be a non-empty string")
+            result[key] = item.strip()
+    confidence = value.get("confidence")
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise ValueError("finding.confidence must be a number")
+        if not 0 <= float(confidence) <= 1:
+            raise ValueError("finding.confidence must be between 0 and 1")
+        result["confidence"] = float(confidence)
+    result["evidence"] = _validate_evidence(value.get("evidence"))
+    return result
 
 
 def validate_reason_payload(
@@ -154,7 +238,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
     return "fact", fact_description.strip()
 
 
-def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -164,7 +248,32 @@ def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
         data = payload
     if not isinstance(data, dict):
         raise ValueError("accepted must be true or false")
+    if "finding" in data:
+        finding = _validate_finding(data["finding"])
+        finding["attempts"] = _validate_attempts(data.get("attempts"))
+        return "fact", finding
     description = data.get("description")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("description is required")
-    return "fact", description.strip()
+    return "fact", {"description": description.strip(), "evidence": [], "attempts": []}
+
+
+def validate_verify_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    accepted, data = _unwrap_wrapped_payload(payload)
+    if accepted is False:
+        return "rejected", None
+    if accepted is None:
+        data = payload
+    if not isinstance(data, dict):
+        raise ValueError("accepted must be true or false")
+    verdict = data.get("verdict")
+    if verdict not in {"verified", "rejected"}:
+        raise ValueError("verdict must be verified or rejected")
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("summary is required")
+    return "verdict", {
+        "verdict": verdict,
+        "summary": summary.strip(),
+        "evidence": _validate_evidence(data.get("evidence")),
+    }

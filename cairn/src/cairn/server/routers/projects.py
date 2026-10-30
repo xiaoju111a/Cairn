@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -25,16 +25,20 @@ from cairn.server.services import (
     expire_reason_leases,
     expire_workers,
     get_completion_intent_or_409,
+    fact_to_model,
     get_project_or_404,
     intent_to_model,
     next_fact_id,
     next_hint_id,
     next_intent_id,
     next_project_id,
+    new_lease_id,
     project_meta_from_row,
     project_reason_from_row,
     utcnow,
+    require_matching_lease,
     validate_facts_exist,
+    validate_facts_verified,
     validate_goal_not_in_sources,
 )
 
@@ -85,12 +89,14 @@ def create_project(body: CreateProjectRequest):
             (pid, body.title, body.bootstrap_enabled, now),
         )
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            ("origin", pid, body.origin),
+            "INSERT INTO facts (id, project_id, description, status, created_by, created_at, verified_by, verified_at) "
+            "VALUES (?, ?, ?, 'verified', 'system', ?, 'system', ?)",
+            ("origin", pid, body.origin, now, now),
         )
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            ("goal", pid, body.goal),
+            "INSERT INTO facts (id, project_id, description, status, created_by, created_at, verified_by, verified_at) "
+            "VALUES (?, ?, ?, 'verified', 'system', ?, 'system', ?)",
+            ("goal", pid, body.goal, now, now),
         )
 
         hints = []
@@ -113,8 +119,8 @@ def create_project(body: CreateProjectRequest):
                 reason=None,
             ),
             facts=[
-                Fact(id="origin", description=body.origin),
-                Fact(id="goal", description=body.goal),
+                Fact(id="origin", description=body.origin, created_by="system", created_at=now, verified_by="system", verified_at=now),
+                Fact(id="goal", description=body.goal, created_by="system", created_at=now, verified_by="system", verified_at=now),
             ],
             intents=[],
             hints=hints,
@@ -138,7 +144,7 @@ def get_project(project_id: str):
 
         return ProjectDetail(
             project=project_meta_from_row(row),
-            facts=[Fact(**dict(f)) for f in facts],
+            facts=[fact_to_model(conn, f, project_id) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
         )
@@ -180,7 +186,7 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
         )
         if body.status == "stopped":
             conn.execute(
-                "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
+                "UPDATE intents SET worker = NULL, lease_id = NULL WHERE project_id = ? AND concluded_at IS NULL",
                 (project_id,),
             )
             clear_project_reason(conn, project_id)
@@ -189,7 +195,7 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
 
 
 @router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta)
-def claim_project_reason(project_id: str, body: ReasonClaimRequest):
+def claim_project_reason(project_id: str, body: ReasonClaimRequest, response: Response):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -198,26 +204,34 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
         if current_worker is not None and current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
         if current_worker == body.worker:
+            require_matching_lease(
+                row["reason_lease_id"], body.lease_id, scope="Project reason"
+            )
+            response.headers["X-Cairn-Lease-Id"] = row["reason_lease_id"]
             return project_meta_from_row(row)
 
         now = utcnow()
+        # Never reuse a caller-provided token for a new claim; stale writers may still hold it.
+        lease_id = new_lease_id()
         conn.execute(
             """
             UPDATE projects
             SET reason_worker = ?,
                 reason_trigger = ?,
                 reason_started_at = ?,
-                reason_last_heartbeat_at = ?
+                reason_last_heartbeat_at = ?,
+                reason_lease_id = ?
             WHERE id = ?
             """,
-            (body.worker, body.trigger, now, now, project_id),
+            (body.worker, body.trigger, now, now, lease_id, project_id),
         )
+        response.headers["X-Cairn-Lease-Id"] = lease_id
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_meta_from_row(updated)
 
 
 @router.post("/projects/{project_id}/reason/heartbeat", response_model=ProjectMeta)
-def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
+def heartbeat_project_reason(project_id: str, body: HeartbeatRequest, response: Response):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -227,12 +241,16 @@ def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
             raise HTTPException(409, "Project reason is not currently claimed")
         if current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+        require_matching_lease(
+            row["reason_lease_id"], body.lease_id, scope="Project reason"
+        )
 
         now = utcnow()
         conn.execute(
             "UPDATE projects SET reason_last_heartbeat_at = ? WHERE id = ?",
             (now, project_id),
         )
+        response.headers["X-Cairn-Lease-Id"] = row["reason_lease_id"]
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_meta_from_row(updated)
 
@@ -248,6 +266,9 @@ def release_project_reason(project_id: str, body: HeartbeatRequest):
             return project_meta_from_row(row)
         if current_worker != body.worker:
             raise HTTPException(409, f"Project reason is currently claimed by {current_worker}")
+        require_matching_lease(
+            row["reason_lease_id"], body.lease_id, scope="Project reason"
+        )
 
         clear_project_reason(conn, project_id)
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
@@ -259,7 +280,18 @@ def complete_project(project_id: str, body: CompleteRequest):
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
+        project = get_project_or_404(conn, project_id)
+        if project["reason_worker"] is not None:
+            if project["reason_worker"] != body.worker:
+                raise HTTPException(
+                    409,
+                    f"Project reason is currently claimed by {project['reason_worker']}",
+                )
+            require_matching_lease(
+                project["reason_lease_id"], body.lease_id, scope="Project reason"
+            )
         validate_facts_exist(conn, project_id, body.from_)
+        validate_facts_verified(conn, project_id, body.from_)
         validate_goal_not_in_sources(body.from_)
 
         now = utcnow()
@@ -281,7 +313,8 @@ def complete_project(project_id: str, body: CompleteRequest):
                 reason_worker = NULL,
                 reason_trigger = NULL,
                 reason_started_at = NULL,
-                reason_last_heartbeat_at = NULL
+                reason_last_heartbeat_at = NULL,
+                reason_lease_id = NULL
             WHERE id = ?
             """,
             (project_id,),
@@ -326,8 +359,10 @@ def reopen_project(project_id: str, body: ReopenRequest):
             (completion["id"], project_id),
         )
         conn.execute(
-            "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
-            (fact_id, project_id, description),
+            "INSERT INTO facts (id, project_id, description, status, created_by, created_at, "
+            "verification_summary, verified_by, verified_at) "
+            "VALUES (?, ?, ?, 'verified', ?, ?, 'Trusted external feedback', ?, ?)",
+            (fact_id, project_id, description, creator, now, creator, now),
         )
         conn.execute(
             "INSERT INTO intents (id, project_id, to_fact_id, description, creator, worker, last_heartbeat_at, created_at, concluded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -353,6 +388,12 @@ def reopen_project(project_id: str, body: ReopenRequest):
         assert updated_intent is not None
         return ReopenResponse(
             project=project_meta_from_row(updated_project),
-            fact=Fact(id=fact_id, description=description),
+            fact=fact_to_model(
+                conn,
+                conn.execute(
+                    "SELECT * FROM facts WHERE id = ? AND project_id = ?", (fact_id, project_id)
+                ).fetchone(),
+                project_id,
+            ),
             intent=intent_to_model(conn, updated_intent, project_id),
         )

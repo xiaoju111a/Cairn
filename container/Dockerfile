@@ -15,7 +15,7 @@ RUN sudo apt update && \
     dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install pwntools pymongo --break-system-packages && \
+    pip3 install pwntools pymongo packaging --break-system-packages && \
     sudo npm install -g @playwright/cli@latest && \
     cd /tmp && playwright-cli install
 
@@ -87,5 +87,7 @@ COPY ./.agents /home/kali/workspace/.agents
 COPY ./.agents /home/kali/workspace/.claude
 COPY ./AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./AGENTS.md /home/kali/workspace/CLAUDE.md
+COPY ./cve_intel.py /usr/local/bin/cve-intel
+RUN sudo chmod +x /usr/local/bin/cve-intel
 
 WORKDIR /home/kali/workspace

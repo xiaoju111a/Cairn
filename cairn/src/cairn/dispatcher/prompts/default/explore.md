@@ -12,14 +12,19 @@ When rejecting a task, return the following (under no circumstances should you r
 
 Normal return example:
 ```json
-{"accepted": true, "data": {"description": "..."}}
+{"accepted":true,"data":{"finding":{"description":"...","category":"service|vulnerability|credential|access|artifact|other","target":"...","component":"...","version":"...","confidence":0.8,"evidence":[{"kind":"command|http|file|observation|reference","summary":"...","artifact_path":"optional path","source_url":"optional URL"}]},"attempts":[{"action":"what was tried","outcome":"success|failed|inconclusive","summary":"what happened","artifact_path":"optional path"}]}}
 ```
 
 # Rules
 - Exploring the direction of an Intent may be valuable or may fail. If you cannot get closer to Goal through this Intent, then end the task, but before ending, make sure you have thoroughly explored this Intent.
 - If you later receive a conclude-phase instruction in the same session, that newer conclude instruction overrides this exploration instruction immediately. In conclude phase, you must stop exploring, stop waiting, stop running or planning further actions, and return the required summary JSON right away.
-- `description` must clearly state the confirmed key objective results. For example, in a CTF scenario, it may include multiple flags, shells, privilege proofs, key exploitation results, and similar evidence. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
-- `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
+- `finding.description` must clearly state the latest incremental result. It is a candidate until an independent Verify task confirms it.
+- Include direct evidence and every material attempt, including failed or inconclusive attempts. Do not hide negative results.
+- Use `confidence` as an estimate from 0 to 1, not as a substitute for evidence.
+- Do not put long data blobs in fields; store them in a file and reference `artifact_path`.
+- Populate `target`, `component`, and `version` whenever the observation supports them. Preserve the exact observed value in evidence so the normalized asset graph remains auditable.
+- Reuse `asset_intelligence` entities and relationships from the graph instead of treating aliases as unrelated assets. If an entity is conflicted, collect evidence that can resolve the conflict.
+- For a discovered component, prefer the matching `asset_intelligence.cve_queries[].command`, or run `cve-intel recommend --product ... --version ...`. Review `score_reasons` and applicability. Only `exact` and `range` are structured version matches; `candidate` requires further confirmation.
 
 # Context
 ## Graph

@@ -594,7 +594,7 @@ if running_project_count < runtime.max_running_projects:
 - `reason` 也计入对应项目的 `runtime.max_project_workers`
 - `runtime.max_workers`：Dispatcher 同时运行中的任务总数上限
 - `runtime.max_running_projects`：当前 dispatcher 运行期内已接手且仍为 `active` 的项目 admission 上限；项目即使暂时没有可派发任务，只要仍为 `active`，也继续占用该名额，直到其退出 active
-- `runtime.max_project_workers`：单个项目内同时运行的任务上限，统一计入 `bootstrap`、`reason` 和 `explore`
+- `runtime.max_project_workers`：单个项目内同时运行的任务上限，统一计入 `bootstrap`、`reason`、`explore` 和 `verify`
 - `workers[].max_running`：单个 Worker 自身的并发上限；达到上限后，这个 Worker 暂时不再参与派发
 
 ---
@@ -611,7 +611,7 @@ Dispatcher 固定从 `stdout` 取全文作为模型正文输出。
 | --- | --- | --- |
 | `name` | Worker 静态标识 | 协议写回时作为 `creator` 或 `worker` |
 | `type` | Worker driver 名 | 支持 `claudecode`、`codex`、`mock` |
-| `task_types` | 支持的任务类型 | `bootstrap`、`reason`、`explore` |
+| `task_types` | 支持的任务类型 | `bootstrap`、`reason`、`explore`、`verify` |
 | `max_running` | Worker 并发上限 | 达到上限后暂不派发 |
 | `priority` | 选择优先级 | 数字越小越优先 |
 | `env` | 运行时环境变量 | 由对应 driver 使用；`mock` 的 phase 耗时和结果概率也通过这里配置 |
@@ -823,9 +823,10 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 - `tasks.reason.timeout` 必须存在
 - `tasks.explore.timeout` 必须存在
 - `tasks.explore.conclude_timeout` 必须存在
+- `tasks.verify.timeout` 必须存在
 - 每个 Worker 都必须有 `type`
 - 每个 Worker 都必须有 `max_running`
-- `task_types` 只允许 `bootstrap`、`reason`、`explore`
+- `task_types` 只允许 `bootstrap`、`reason`、`explore`、`verify`
 - `type` 只允许 `claudecode`、`codex`、`mock`
 - `max_running` 必须是正整数
 - `claudecode`、`codex`、`mock` 都支持双阶段 `explore`
@@ -834,9 +835,11 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 - 默认 prompt 组下，`reason.md` 必须至少覆盖 `{graph_yaml}`、`{fact_ids}`、`{open_intents}`
 - 默认 prompt 组下，`explore.md` 必须至少覆盖 `{graph_yaml}`、`{intent_id}`、`{intent_description}`
 - 默认 prompt 组下，`bootstrap.md` 和 `bootstrap_conclude.md` 必须至少覆盖 `{origin}`、`{goal}`、`{hints}`
+- 默认 prompt 组下，`verify.md` 必须至少覆盖 `{graph_yaml}`、`{fact_id}`、`{fact_json}`
 - `mock` prompt 组下，`reason.md` 必须至少覆盖 `{fact_ids}`、`{open_intents}`
 - `mock` prompt 组下，`explore.md` 和 `explore_conclude.md` 必须至少覆盖 `{intent_id}`
 - `mock` prompt 组下，`bootstrap.md` 和 `bootstrap_conclude.md` 必须至少覆盖 `{origin}`、`{goal}`、`{hints}`
+- `mock` prompt 组下，`verify.md` 必须至少覆盖 `{fact_id}`、`{fact_json}`
 - `mock` worker 的 `MOCK_*` 变量名只能使用系统支持的 phase
 - `mock` worker 每个 phase 的概率都必须在 `0` 到 `1` 之间，且总和必须严格等于 `1.0`
 
@@ -917,6 +920,7 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 | `tasks.reason.timeout` | 是 | `reason` 的超时 |
 | `tasks.explore.timeout` | 是 | `explore` 第一阶段超时 |
 | `tasks.explore.conclude_timeout` | 是 | `explore` 双阶段收尾超时 |
+| `tasks.verify.timeout` | 是 | 独立验证候选 Fact 的超时 |
 
 ### `workers.*`
 
@@ -931,7 +935,7 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 
 补充：
 
-- Worker 选择顺序是：先过滤任务类型、`max_running` 和处于本地 `retry_after` 窗口内的 Worker，再按 `priority`，同优先级优先选当前运行数更少的，最后随机；`bootstrap` 和 `explore` 都会先 claim，再启动任务；当 `runtime.worker_healthcheck=startup_and_task` 时，真正启动前会做一次健康检查，失败的 Worker 会进入短暂不可选窗口；进入 `bootstrap_conclude` / `explore_conclude` fallback 时不再重复健康检查
+- Worker 选择顺序是：先过滤任务类型、`max_running` 和处于本地 `retry_after` 窗口内的 Worker，再按 `priority`，同优先级优先选当前运行数更少的，最后随机；`bootstrap`、`explore` 和 `verify` 都会先 claim，再启动任务；当 `runtime.worker_healthcheck=startup_and_task` 时，真正启动前会做一次健康检查，失败的 Worker 会进入短暂不可选窗口；进入 `bootstrap_conclude` / `explore_conclude` fallback 时不再重复健康检查
 - 健康检查、执行命令、session 提取、二阶段 `conclude` 都由对应 driver 代码负责
 - prompt 内容从代码工程里的 markdown 资源加载
 

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import threading
+import uuid
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -25,6 +26,8 @@ class InProcessClient:
     def __init__(self, http: TestClient):
         self.http = http
         self._summaries = TypeAdapter(list[ProjectSummary])
+        self._intent_leases: dict[tuple[str, str], str] = {}
+        self._reason_leases: dict[str, str] = {}
 
     def close(self) -> None:
         return None
@@ -50,42 +53,155 @@ class InProcessClient:
         return response.text
 
     def heartbeat(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/heartbeat", {"worker": worker})
+        key = (project_id, intent_id)
+        lease_id = self._intent_leases.setdefault(key, uuid.uuid4().hex)
+        result = self._post(
+            f"/projects/{project_id}/intents/{intent_id}/heartbeat",
+            {"worker": worker, "lease_id": lease_id},
+        )
+        if result.ok and result.headers.get("x-cairn-lease-id"):
+            self._intent_leases[key] = result.headers["x-cairn-lease-id"]
+        return result
 
     def claim_reason(self, project_id: str, worker: str, trigger: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/claim", {"worker": worker, "trigger": trigger})
+        lease_id = self._reason_leases.setdefault(project_id, uuid.uuid4().hex)
+        result = self._post(
+            f"/projects/{project_id}/reason/claim",
+            {"worker": worker, "trigger": trigger, "lease_id": lease_id},
+        )
+        if result.ok and result.headers.get("x-cairn-lease-id"):
+            self._reason_leases[project_id] = result.headers["x-cairn-lease-id"]
+        return result
 
     def reason_heartbeat(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/heartbeat", {"worker": worker})
+        return self._post(
+            f"/projects/{project_id}/reason/heartbeat",
+            {"worker": worker, "lease_id": self._reason_leases.get(project_id)},
+        )
 
     def release_reason(self, project_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/reason/release", {"worker": worker})
+        result = self._post(
+            f"/projects/{project_id}/reason/release",
+            {"worker": worker, "lease_id": self._reason_leases.get(project_id)},
+        )
+        if result.ok:
+            self._reason_leases.pop(project_id, None)
+        return result
 
     def release(self, project_id: str, intent_id: str, worker: str) -> ApiResult:
-        return self._post(f"/projects/{project_id}/intents/{intent_id}/release", {"worker": worker})
-
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
-        return self._post(
-            f"/projects/{project_id}/intents/{intent_id}/conclude",
-            {"worker": worker, "description": description},
+        key = (project_id, intent_id)
+        result = self._post(
+            f"/projects/{project_id}/intents/{intent_id}/release",
+            {"worker": worker, "lease_id": self._intent_leases.get(key)},
         )
+        if result.ok:
+            self._intent_leases.pop(key, None)
+        return result
+
+    def conclude(self, project_id: str, intent_id: str, worker: str, finding: str | dict[str, Any], *, status: str = "candidate") -> ApiResult:
+        key = (project_id, intent_id)
+        payload = {"description": finding} if isinstance(finding, str) else finding
+        result = self._post(
+            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            {
+                "worker": worker,
+                "status": status,
+                **payload,
+                "lease_id": self._intent_leases.get(key),
+            },
+        )
+        if result.ok:
+            self._intent_leases.pop(key, None)
+        return result
+
+    def verify_fact(
+        self,
+        project_id: str,
+        fact_id: str,
+        intent_id: str,
+        worker: str,
+        verdict: str,
+        summary: str,
+        evidence: list[dict[str, Any]],
+    ) -> ApiResult:
+        key = (project_id, intent_id)
+        result = self._post(
+            f"/projects/{project_id}/facts/{fact_id}/verify",
+            {
+                "intent_id": intent_id,
+                "worker": worker,
+                "verdict": verdict,
+                "summary": summary,
+                "evidence": evidence,
+                "lease_id": self._intent_leases.get(key),
+            },
+        )
+        if result.ok:
+            self._intent_leases.pop(key, None)
+        return result
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         return self._post(
             f"/projects/{project_id}/complete",
-            {"from": from_ids, "description": description, "worker": worker},
+            {
+                "from": from_ids,
+                "description": description,
+                "worker": worker,
+                "lease_id": self._reason_leases.get(project_id),
+            },
         )
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
         return self._post(
             f"/projects/{project_id}/intents",
-            {"from": from_ids, "description": description, "creator": creator, "worker": None},
+            {
+                "from": from_ids,
+                "description": description,
+                "creator": creator,
+                "worker": None,
+                "lease_id": self._reason_leases.get(project_id),
+            },
+        )
+
+    def start_task_run(
+        self,
+        project_id: str,
+        run_id: str,
+        task_type: str,
+        worker: str,
+        intent_id: str | None,
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/runs",
+            {
+                "id": run_id,
+                "task_type": task_type,
+                "worker": worker,
+                "intent_id": intent_id,
+            },
+        )
+
+    def finish_task_run(self, project_id: str, run_id: str, outcome: str) -> ApiResult:
+        response = self.http.put(
+            f"/projects/{project_id}/runs/{run_id}", json={"outcome": outcome}
+        )
+        data = response.json()
+        return ApiResult(
+            response.status_code,
+            data,
+            response.text,
+            {key.lower(): value for key, value in response.headers.items()},
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
-        return ApiResult(response.status_code, data, response.text)
+        return ApiResult(
+            response.status_code,
+            data,
+            response.text,
+            {key.lower(): value for key, value in response.headers.items()},
+        )
 
 
 class LocalProcess:
@@ -201,6 +317,7 @@ def _config(
     bootstrap: str,
     reason: str,
     explore: str,
+    verify: str | None = None,
     task_types: list[str] | None = None,
     worker_healthcheck: str = "startup_only",
     healthcheck: str | None = None,
@@ -221,6 +338,7 @@ def _config(
                 "bootstrap": {"timeout": 2, "conclude_timeout": 2},
                 "reason": {"timeout": 2, "max_intents": 1},
                 "explore": {"timeout": 2, "conclude_timeout": 2},
+                "verify": {"timeout": 2},
             },
             "container": {
                 "image": "unused",
@@ -231,7 +349,7 @@ def _config(
                 {
                     "name": "mock-worker",
                     "type": "mock",
-                    "task_types": task_types or ["bootstrap", "reason", "explore"],
+                    "task_types": task_types or ["bootstrap", "reason", "explore", "verify"],
                     "max_running": 1,
                     "priority": 0,
                     "env": {
@@ -239,6 +357,7 @@ def _config(
                         "MOCK_BOOTSTRAP": bootstrap,
                         "MOCK_REASON": reason,
                         "MOCK_EXPLORE_EXECUTE": explore,
+                        "MOCK_VERIFY": verify or _phase("verified"),
                     },
                 }
             ],
@@ -327,14 +446,15 @@ def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: T
         containers,
     )
     project_id = _create_project(http_client)
-    seed = client.create_intent(project_id, ["origin"], "seed", "seed-worker")
+    seed = client.create_intent(project_id, ["origin"], "bootstrap", "dispatcher.bootstrap")
     assert seed.ok
     assert client.heartbeat(project_id, "i001", "seed-worker").ok
-    assert client.conclude(project_id, "i001", "seed-worker", "seed fact").ok
+    assert client.conclude(project_id, "i001", "seed-worker", "seed fact", status="verified").ok
 
     try:
         _dispatch_and_wait(loop)
         assert loop.reason_checkpoints[project_id] == ReasonCheckpoint(3, 0, 0)
+        _dispatch_and_wait(loop)
         _dispatch_and_wait(loop)
         _dispatch_and_wait(loop)
         project = client.get_project(project_id)
@@ -346,7 +466,8 @@ def test_mock_scheduler_runs_reason_explore_reason_complete_chain(http_client: T
     assert [(intent.id, intent.to) for intent in project.intents] == [
         ("i001", "f001"),
         ("i002", "f002"),
-        ("i003", "goal"),
+        ("i003", "f002"),
+        ("i004", "goal"),
     ]
     assert any("/reason_execute-" in path and "f002" in content for _, path, content in containers.writes)
     assert any("/explore_execute-" in path and "f001" in content for _, path, content in containers.writes)
@@ -439,7 +560,7 @@ def _failover_config() -> DispatchConfig:
         return {
             "name": name,
             "type": "mock",
-            "task_types": ["bootstrap", "reason", "explore"],
+            "task_types": ["bootstrap", "reason", "explore", "verify"],
             "max_running": 1,
             "priority": priority,
             "env": {
@@ -447,6 +568,7 @@ def _failover_config() -> DispatchConfig:
                 "MOCK_BOOTSTRAP": _phase("complete"),
                 "MOCK_REASON": _phase("complete", zero_outcomes=["intent"]),
                 "MOCK_EXPLORE_EXECUTE": _phase("fact"),
+                "MOCK_VERIFY": _phase("verified"),
             },
         }
 
@@ -466,6 +588,7 @@ def _failover_config() -> DispatchConfig:
                 "bootstrap": {"timeout": 2, "conclude_timeout": 2},
                 "reason": {"timeout": 2, "max_intents": 1},
                 "explore": {"timeout": 2, "conclude_timeout": 2},
+                "verify": {"timeout": 2},
             },
             "container": {"image": "unused", "network_mode": "host", "completed_action": "stop"},
             "workers": [

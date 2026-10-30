@@ -25,6 +25,7 @@ def make_config() -> DispatchConfig:
                 "bootstrap": {"timeout": 10, "conclude_timeout": 5},
                 "reason": {"timeout": 10, "max_intents": 3},
                 "explore": {"timeout": 10, "conclude_timeout": 5},
+                "verify": {"timeout": 10},
             },
             "container": {
                 "image": "test-image",
@@ -35,7 +36,7 @@ def make_config() -> DispatchConfig:
                 {
                     "name": "test-worker",
                     "type": "mock",
-                    "task_types": ["bootstrap", "reason", "explore"],
+                    "task_types": ["bootstrap", "reason", "explore", "verify"],
                     "max_running": 1,
                     "priority": 0,
                 }
@@ -111,7 +112,8 @@ class FakeContainerManager:
 @dataclass
 class FakeClient:
     project: ProjectDetail
-    concluded: list[tuple[str, str, str, str]] = field(default_factory=list)
+    concluded: list[tuple[str, str, str, object]] = field(default_factory=list)
+    verified: list[tuple[str, str, str, str, str, str, list[dict]]] = field(default_factory=list)
     completed: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     created_intents: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     released: list[tuple[str, str, str]] = field(default_factory=list)
@@ -120,13 +122,26 @@ class FakeClient:
     def get_project(self, _project_id: str) -> ProjectDetail:
         return self.project
 
-    def conclude(self, project_id: str, intent_id: str, worker: str, description: str) -> ApiResult:
-        self.concluded.append((project_id, intent_id, worker, description))
+    def conclude(self, project_id: str, intent_id: str, worker: str, finding, *, status: str = "candidate") -> ApiResult:
+        self.concluded.append((project_id, intent_id, worker, finding))
         return ApiResult(200, {"fact": {"id": "f002"}})
 
     def complete(self, project_id: str, from_ids: list[str], description: str, worker: str) -> ApiResult:
         self.completed.append((project_id, from_ids, description, worker))
         return ApiResult(200, {})
+
+    def verify_fact(
+        self,
+        project_id: str,
+        fact_id: str,
+        intent_id: str,
+        worker: str,
+        verdict: str,
+        summary: str,
+        evidence: list[dict],
+    ) -> ApiResult:
+        self.verified.append((project_id, fact_id, intent_id, worker, verdict, summary, evidence))
+        return ApiResult(200, {"id": fact_id, "status": verdict})
 
     def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
         self.created_intents.append((project_id, from_ids, description, creator))

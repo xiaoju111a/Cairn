@@ -3,19 +3,22 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 import json
 from importlib import resources
+import os
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap"]
+TaskType = Literal["reason", "explore", "bootstrap", "verify"]
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 ExecutionMode = Literal["container", "local"]
 LocalCompletedAction = Literal["keep", "remove"]
+ENV_REFERENCE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*))?\}$", re.DOTALL)
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "claudecode": (
@@ -43,6 +46,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "verify.md": ("{graph_yaml}", "{fact_id}", "{fact_json}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -52,6 +56,7 @@ PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
         "explore_conclude.md": ("{intent_id}",),
         "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
         "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+        "verify.md": ("{fact_id}", "{fact_json}"),
     }
 }
 
@@ -62,6 +67,7 @@ MOCK_ALLOWED_OUTCOMES: dict[str, frozenset[str]] = {
     "explore_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap": frozenset({"complete", "fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
     "bootstrap_conclude": frozenset({"fact", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
+    "verify": frozenset({"verified", "rejected_finding", "rejected", "invalid_json", "invalid_payload", "command_fail"}),
 }
 
 MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
@@ -122,6 +128,17 @@ MOCK_DEFAULT_BEHAVIOR: dict[str, dict[str, Any]] = {
             "command_fail": "0.0",
         },
     },
+    "verify": {
+        "delay": [0.05, 0.3],
+        "outcomes": {
+            "verified": "1.0",
+            "rejected_finding": "0.0",
+            "rejected": "0.0",
+            "invalid_json": "0.0",
+            "invalid_payload": "0.0",
+            "command_fail": "0.0",
+        },
+    },
 }
 
 MOCK_ALLOWED_ENV_KEYS = frozenset(
@@ -144,17 +161,39 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class VerifyTaskConfig(BaseModel):
+    timeout: int = Field(gt=0)
+
+
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
+    verify: VerifyTaskConfig
+
+
+class ContainerVolumeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bind: str = Field(min_length=1)
+    mode: Literal["ro", "rw"] = "ro"
 
 
 class ContainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     image: str
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    cap_drop: list[str] = Field(default_factory=list)
+    volumes: dict[str, ContainerVolumeConfig] = Field(default_factory=dict)
+    memory_limit: str | int | None = None
+    cpu_limit: float | None = Field(default=None, gt=0)
+    pids_limit: int | None = Field(default=None, gt=0)
+    read_only: bool = False
+    security_opt: list[str] = Field(default_factory=list)
+    tmpfs: dict[str, str] = Field(default_factory=dict)
 
 
 class LocalConfig(BaseModel):
@@ -274,9 +313,29 @@ class DispatchConfig(BaseModel):
     @classmethod
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = _expand_environment_references(data)
         config = cls.model_validate(data)
         validate_prompt_resources(config.runtime.prompt_group)
         return config
+
+
+def _expand_environment_references(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _expand_environment_references(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_environment_references(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    match = ENV_REFERENCE_RE.fullmatch(value)
+    if match is None:
+        return value
+    name, default = match.groups()
+    resolved = os.environ.get(name)
+    if resolved is not None:
+        return resolved
+    if default is not None:
+        return default
+    raise ValueError(f"environment variable {name} is required by the dispatch config")
 
 
 def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], key: str) -> None:

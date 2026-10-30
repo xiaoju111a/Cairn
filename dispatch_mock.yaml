@@ -19,11 +19,16 @@ tasks:
   explore:
     timeout: 9
     conclude_timeout: 5
+  verify:
+    timeout: 9
 
 container:
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  image: "cairn-worker-container:latest"
   network_mode: "host"
   completed_action: "stop"
+  memory_limit: "2g"
+  cpu_limit: 2
+  pids_limit: 512
   cap_add:
     - "NET_RAW"
     - "NET_ADMIN"
@@ -35,7 +40,7 @@ common_env:
 workers:
   - name: "mock-observer-1"
     type: "mock"
-    task_types: [reason, explore, bootstrap]
+    task_types: [reason, explore, bootstrap, verify]
     max_running: 1
     priority: 0
     env:
@@ -45,10 +50,11 @@ workers:
       MOCK_REASON: '{"delay":[2,6],"outcomes":{"complete":0.1,"intent":0.4,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
+      MOCK_VERIFY: '{"delay":[2,6],"outcomes":{"verified":0.7,"rejected_finding":0.1,"rejected":0.05,"invalid_json":0.05,"invalid_payload":0.05,"command_fail":0.05}}'
 
   - name: "mock-observer-2"
     type: "mock"
-    task_types: [reason, explore, bootstrap]
+    task_types: [reason, explore, bootstrap, verify]
     max_running: 1
     priority: 0
     env:
@@ -58,3 +64,4 @@ workers:
       MOCK_REASON: '{"delay":[2,6],"outcomes":{"complete":0.1,"intent":0.4,"noop":0.1,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_EXECUTE: '{"delay":[5,10],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
       MOCK_EXPLORE_CONCLUDE: '{"delay":[2,6],"outcomes":{"fact":0.6,"rejected":0.1,"invalid_json":0.1,"invalid_payload":0.1,"command_fail":0.1}}'
+      MOCK_VERIFY: '{"delay":[2,6],"outcomes":{"verified":0.7,"rejected_finding":0.1,"rejected":0.05,"invalid_json":0.05,"invalid_payload":0.05,"command_fail":0.05}}'

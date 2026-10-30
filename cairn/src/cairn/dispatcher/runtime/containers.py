@@ -55,6 +55,22 @@ class ContainerManager:
                 name=name,
                 network_mode=self._config.network_mode,
                 cap_add=self._config.cap_add or None,
+                cap_drop=self._config.cap_drop or None,
+                mem_limit=self._config.memory_limit,
+                nano_cpus=(
+                    int(self._config.cpu_limit * 1_000_000_000)
+                    if self._config.cpu_limit is not None
+                    else None
+                ),
+                pids_limit=self._config.pids_limit,
+                read_only=self._config.read_only,
+                security_opt=self._config.security_opt or None,
+                tmpfs=self._config.tmpfs or None,
+                volumes={
+                    source: mount.model_dump()
+                    for source, mount in self._config.volumes.items()
+                }
+                or None,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name

@@ -4,6 +4,7 @@ import logging
 import shutil
 import subprocess
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,13 +23,15 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
-from cairn.server.models import Intent, ProjectDetail, ProjectSummary
+from cairn.dispatcher.tasks.verify import run_verify_task
+from cairn.server.models import Fact, Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
 UNHEALTHY_RETRY_AFTER_SECONDS = 5
 REJECTED_RETRY_AFTER_SECONDS = 5
 BOOTSTRAP_INTENT_DESCRIPTION = "bootstrap"
 BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
+VERIFY_INTENT_CREATOR = "dispatcher.verify"
 
 
 @dataclass(slots=True)
@@ -290,6 +293,28 @@ class DispatcherLoop:
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
             return self._dispatch_reason(project, export_yaml, "initial")
+        candidates = [fact for fact in project.facts if fact.status == "candidate"]
+        if candidates:
+            candidates.sort(key=lambda fact: (fact.created_at or "", fact.id))
+            running_verify_ids = self._project_running_verify_intents(summary.id)
+            for fact in candidates:
+                intent = self._get_verify_intent(project, fact.id)
+                if intent is None:
+                    intent = self._create_verify_intent(project.project.id, fact.id)
+                    if intent is None:
+                        return False
+                if intent.id in running_verify_ids or intent.worker is not None:
+                    continue
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_verify(project, export_yaml, fact, intent)
+            self._log_changed(
+                f"{skip_scope}:verify_running",
+                logging.DEBUG,
+                "skip project=%s because candidate verification is already running facts=%s",
+                summary.id,
+                [fact.id for fact in candidates],
+            )
+            return False
         if project.project.reason is None:
             reason_trigger = self._reason_trigger(project)
             if reason_trigger is not None:
@@ -303,6 +328,7 @@ class DispatcherLoop:
             and intent.worker is None
             and intent.id not in running_intent_ids
             and not self._is_bootstrap_intent(intent)
+            and not self._is_verify_intent(intent)
         ]
         if running_intent_ids and not unclaimed_intents:
             self._log_changed(
@@ -397,6 +423,10 @@ class DispatcherLoop:
                 claim.status_code,
             )
             return False
+        run_id = self._start_task_run(project.project.id, "reason", worker.name, None)
+        if run_id is None:
+            self._best_effort_release_reason(project.project.id, worker.name)
+            return False
         try:
             future = self.executor.submit(
                 run_reason_task,
@@ -410,6 +440,7 @@ class DispatcherLoop:
             )
         except Exception:
             LOG.exception("failed to submit reason task project=%s worker=%s", project.project.id, worker.name)
+            self.client.finish_task_run(project.project.id, run_id, "failed")
             self._best_effort_release_reason(project.project.id, worker.name)
             return False
         self.futures[future] = RunningTask(
@@ -421,6 +452,7 @@ class DispatcherLoop:
             fact_count=len(project.facts),
             hint_count=len(project.hints),
             open_intent_count=self._project_open_intent_count(project),
+            run_id=run_id,
         )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
@@ -464,6 +496,10 @@ class DispatcherLoop:
                 claim.status_code,
             )
             return False
+        run_id = self._start_task_run(project.project.id, "bootstrap", worker.name, intent.id)
+        if run_id is None:
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
         try:
             future = self.executor.submit(
                 run_bootstrap_task,
@@ -477,9 +513,17 @@ class DispatcherLoop:
             )
         except Exception:
             LOG.exception("failed to submit bootstrap task project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+            self.client.finish_task_run(project.project.id, run_id, "failed")
             self._best_effort_release(project.project.id, intent.id, worker.name)
             return False
-        self.futures[future] = RunningTask(project.project.id, "bootstrap", worker.name, cancellation, intent_id=intent.id)
+        self.futures[future] = RunningTask(
+            project.project.id,
+            "bootstrap",
+            worker.name,
+            cancellation,
+            intent_id=intent.id,
+            run_id=run_id,
+        )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched bootstrap project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
@@ -522,6 +566,10 @@ class DispatcherLoop:
                 claim.status_code,
             )
             return False
+        run_id = self._start_task_run(project.project.id, "explore", worker.name, intent.id)
+        if run_id is None:
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
         try:
             future = self.executor.submit(
                 run_explore_task,
@@ -536,15 +584,111 @@ class DispatcherLoop:
             )
         except Exception:
             LOG.exception("failed to submit explore task project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+            self.client.finish_task_run(project.project.id, run_id, "failed")
             self._best_effort_release(project.project.id, intent.id, worker.name)
             return False
-        self.futures[future] = RunningTask(project.project.id, "explore", worker.name, cancellation, intent_id=intent.id)
+        self.futures[future] = RunningTask(
+            project.project.id,
+            "explore",
+            worker.name,
+            cancellation,
+            intent_id=intent.id,
+            run_id=run_id,
+        )
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
         return True
 
-    def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
+    def _dispatch_verify(
+        self,
+        project: ProjectDetail,
+        export_yaml: str,
+        fact: Fact,
+        intent: Intent,
+    ) -> bool:
+        selection = self._select_worker(
+            project.project.id, "verify", avoid_worker=fact.created_by
+        )
+        worker = selection.worker
+        if worker is None:
+            self._log_changed(
+                f"project:{project.project.id}:worker:verify",
+                logging.INFO,
+                "no worker available for verify project=%s fact=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s",
+                project.project.id,
+                fact.id,
+                selection.blocked_busy,
+                selection.blocked_unhealthy,
+                selection.blocked_rejected,
+            )
+            return False
+        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        if not claim.ok:
+            LOG.warning(
+                "verify claim failed project=%s fact=%s intent=%s worker=%s status=%s",
+                project.project.id,
+                fact.id,
+                intent.id,
+                worker.name,
+                claim.status_code,
+            )
+            return False
+        run_id = self._start_task_run(
+            project.project.id, "verify", worker.name, intent.id
+        )
+        if run_id is None:
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        try:
+            future = self.executor.submit(
+                run_verify_task,
+                self.config,
+                self.client,
+                self.container_manager,
+                project,
+                export_yaml,
+                fact,
+                intent,
+                worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception(
+                "failed to submit verify task project=%s fact=%s worker=%s",
+                project.project.id,
+                fact.id,
+                worker.name,
+            )
+            self.client.finish_task_run(project.project.id, run_id, "failed")
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(
+            project.project.id,
+            "verify",
+            worker.name,
+            cancellation,
+            intent_id=intent.id,
+            run_id=run_id,
+        )
+        self.runtime_project_ids.add(project.project.id)
+        self._clear_project_log_state(project.project.id)
+        LOG.info(
+            "dispatched verify project=%s fact=%s intent=%s worker=%s",
+            project.project.id,
+            fact.id,
+            intent.id,
+            worker.name,
+        )
+        return True
+
+    def _select_worker(
+        self,
+        project_id: str,
+        task_type: str,
+        *,
+        avoid_worker: str | None = None,
+    ) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
         blocked_busy: list[str] = []
@@ -586,7 +730,8 @@ class DispatcherLoop:
                 blocked_rejected=blocked_rejected,
                 blocked_task_type=blocked_task_type,
             )
-        ordered = choose_worker(candidates, running_counts)
+        preferred = [worker for worker in candidates if worker.name != avoid_worker]
+        ordered = choose_worker(preferred or candidates, running_counts)
         LOG.debug(
             "worker selection project=%s task=%s candidates=%s blocked_busy=%s blocked_unhealthy=%s blocked_rejected=%s blocked_task_type=%s chosen=%s",
             project_id,
@@ -637,6 +782,13 @@ class DispatcherLoop:
             if task.project_id == project_id and task.task_type == "explore" and task.intent_id is not None
         }
 
+    def _project_running_verify_intents(self, project_id: str) -> set[str]:
+        return {
+            task.intent_id
+            for task in self.futures.values()
+            if task.project_id == project_id and task.task_type == "verify" and task.intent_id is not None
+        }
+
     def _running_project_count(self, summaries: list[ProjectSummary]) -> int:
         active_ids = {summary.id for summary in summaries if summary.status == "active"}
         return len(self.runtime_project_ids & active_ids)
@@ -651,6 +803,42 @@ class DispatcherLoop:
             and intent.from_ == ["origin"]
             and intent.to is None
         )
+
+    def _is_verify_intent(self, intent: Intent, fact_id: str | None = None) -> bool:
+        if intent.creator != VERIFY_INTENT_CREATOR or intent.to is not None:
+            return False
+        if fact_id is not None:
+            return intent.description == f"verify:{fact_id}" and intent.from_ == [fact_id]
+        return intent.description.startswith("verify:") and len(intent.from_) == 1
+
+    def _get_verify_intent(self, project: ProjectDetail, fact_id: str) -> Intent | None:
+        matches = [intent for intent in project.intents if self._is_verify_intent(intent, fact_id)]
+        if not matches:
+            return None
+        matches.sort(key=lambda intent: (intent.worker is not None, intent.created_at, intent.id))
+        return matches[0]
+
+    def _create_verify_intent(self, project_id: str, fact_id: str) -> Intent | None:
+        response = self.client.create_intent(
+            project_id,
+            [fact_id],
+            f"verify:{fact_id}",
+            VERIFY_INTENT_CREATOR,
+        )
+        if not response.ok:
+            LOG.warning(
+                "verify intent write failed project=%s fact=%s status=%s body=%s",
+                project_id,
+                fact_id,
+                response.status_code,
+                response.text,
+            )
+            return None
+        try:
+            return Intent.model_validate(response.data)
+        except Exception:
+            LOG.exception("invalid verify intent response project=%s fact=%s", project_id, fact_id)
+            return None
 
     def _get_bootstrap_intent(self, project: ProjectDetail) -> Intent | None:
         intents = [intent for intent in project.intents if self._is_bootstrap_intent(intent)]
@@ -721,6 +909,7 @@ class DispatcherLoop:
         done = [future for future in self.futures if future.done()]
         for future in done:
             task = self.futures.pop(future)
+            outcome = "failed"
             try:
                 outcome = future.result()
                 if outcome == "cancelled":
@@ -780,6 +969,17 @@ class DispatcherLoop:
                     )
             except Exception:
                 LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
+            finally:
+                if task.run_id is not None:
+                    response = self.client.finish_task_run(task.project_id, task.run_id, outcome)
+                    if not response.ok and response.status_code not in (403, 404):
+                        LOG.warning(
+                            "task run finish failed project=%s run=%s outcome=%s status=%s",
+                            task.project_id,
+                            task.run_id,
+                            outcome,
+                            response.status_code,
+                        )
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
@@ -881,6 +1081,32 @@ class DispatcherLoop:
         response = self.client.release(project_id, intent_id, worker_name)
         if not response.ok and response.status_code not in (403, 409):
             LOG.warning("release failed project=%s intent=%s worker=%s status=%s", project_id, intent_id, worker_name, response.status_code)
+
+    def _start_task_run(
+        self,
+        project_id: str,
+        task_type: str,
+        worker_name: str,
+        intent_id: str | None,
+    ) -> str | None:
+        run_id = uuid.uuid4().hex
+        response = self.client.start_task_run(
+            project_id,
+            run_id,
+            task_type,
+            worker_name,
+            intent_id,
+        )
+        if response.ok:
+            return run_id
+        LOG.warning(
+            "task run start failed project=%s task=%s worker=%s status=%s",
+            project_id,
+            task_type,
+            worker_name,
+            response.status_code,
+        )
+        return None
 
     def _best_effort_release_reason(self, project_id: str, worker_name: str) -> None:
         response = self.client.release_reason(project_id, worker_name)

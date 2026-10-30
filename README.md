@@ -48,17 +48,17 @@ This structure is not unique to penetration testing. Vulnerability research, mat
 
 Cairn is built for this class of problems. Penetration testing is the first domain it has been validated on.
 
-The engine is built on a **Blackboard Architecture** with an explicit fact-intent graph. Three primitives are all it needs:
+The engine is built on a **Blackboard Architecture** with an explicit fact-intent graph. Findings move through an evidence gate before they can drive completion:
 
 | Concept | Meaning |
 |---------|---------|
-| **Fact** | A confirmed, objective finding written to the board |
+| **Fact** | A finding with `candidate`, `verified`, or `rejected` status |
 | **Intent** | A declared direction of exploration, not yet executed |
 | **Hint** | Human judgment injected at any time; absorbed by agents on the next read |
 
 The graph grows from `origin` toward `goal`. Every new Fact is a stepping stone; every Intent is a step into the unknown.
 
-Agent Workers run an OODA loop — Observe the full graph, Orient to the current state, Decide on next intents, Act to explore — and write their findings back as new Facts. Workers have no fixed roles. Tasks are generated at runtime from the graph's current state, not from predefined job descriptions.
+Agent Workers run an OODA loop — Observe the full graph, Orient to the current state, Decide on next intents, Act to explore — and write evidence-backed candidate Facts. A separate Verify task independently confirms or rejects each candidate. Reason receives only verified Fact IDs, and the server refuses to complete a Goal from candidate or rejected facts. Workers have no fixed roles. Tasks are generated at runtime from the graph's current state, not from predefined job descriptions.
 
 Agents coordinate exclusively through the shared board (Stigmergy). No direct communication. No information silos.
 
@@ -69,13 +69,16 @@ https://github.com/user-attachments/assets/e557b1ac-dda4-41cb-87dd-9d56dbf05133
 
 ## How It Works
 
-Three task types, all executed by the same Worker:
+Four task types, all executed by the same Worker pool:
 
 | Task | What it does | Output |
 |------|-------------|--------|
 | **Bootstrap** | At project start, attempts to solve the problem directly | Fact + possible Complete |
 | **Reason** | Reads the full graph: is the goal met? What should be explored next? | Complete / new Intents / no-op |
-| **Explore** | Claims one Intent, executes the exploration, reports findings | One Fact |
+| **Explore** | Claims one Intent and records a structured finding, evidence, and attempts | Candidate Fact |
+| **Verify** | Independently reproduces or disproves a candidate | Verified / rejected Fact |
+
+Explore records successful, failed, and inconclusive attempts. Evidence can reference commands, HTTP observations, files, authoritative sources, and artifact paths. Legacy databases are migrated automatically; existing facts remain verified for backward compatibility.
 
 System architecture:
 
@@ -137,12 +140,14 @@ Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
 - Docker (container execution only — not needed for local mode)
 
 
-### Pull required images
- 
-Both setup methods require the worker container image:
- 
+### Build the worker image
+
+Container execution uses the worker image built from this repository. Building it
+locally ensures the agent instructions and `cve-intel` query tool match the
+dispatcher configuration:
+
 ```bash
-docker pull --platform=linux/amd64 ghcr.io/oritera/cairn-worker-container:latest
+docker build --platform=linux/amd64 ./container -t cairn-worker-container:latest
 ```
 
 Create your local dispatcher configuration and fill in your LLM endpoints and API keys:
@@ -150,8 +155,24 @@ Create your local dispatcher configuration and fill in your LLM endpoints and AP
 ```bash
 cp dispatch.example.yaml dispatch.yaml
 ```
+
+Any YAML string may reference an environment variable as `${NAME}` or use a
+default as `${NAME:-value}`. Use this for LLM credentials instead of saving
+real keys in `dispatch.yaml`, for example `ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN}"`.
  
 ### Docker Compose (recommended)
+
+Generate a private API token before starting the stack. The server requires the
+same token from the dispatcher and from browser API requests:
+
+```bash
+export CAIRN_API_TOKEN="$(openssl rand -hex 32)"
+```
+
+Compose binds the UI to `127.0.0.1:8000` by default. To expose it through a
+trusted reverse proxy, set `CAIRN_BIND_HOST` explicitly and terminate TLS at the
+proxy. The browser asks for the API token on its first protected request and
+keeps it in local storage for subsequent requests.
  
 Pull the base image used to build Cairn:
  
@@ -163,11 +184,63 @@ docker pull ghcr.io/astral-sh/uv:python3.13-trixie
 docker compose up --build
 ```
  
-This starts `cairn-server` on port `8000` and `cairn-dispatcher` once the server passes its health check. The dispatcher mounts `dispatch.yaml` from the project root and connects to Docker via the host socket. Data is persisted to `./datas/cairn/`.
+This starts `cairn-server` on loopback port `8000` and `cairn-dispatcher` once
+the server passes its public health check. The dispatcher mounts `dispatch.yaml`
+from the project root and connects to Docker via the host socket. Data is
+persisted to `./datas/cairn/`. Intent and reason claims use opaque lease tokens,
+so a timed-out process cannot submit results after another execution reclaims
+the work. Every dispatched execution is also recorded in the project task-run
+history with its final outcome.
+
+The Compose stack also maintains a shared read-only cache of the official
+[CVE List](https://github.com/CVEProject/cvelistV5). `cairn-cve-updater` performs
+the initial shallow clone, builds an atomic SQLite/FTS5 index, and refreshes
+changed records hourly. The source and index are stored in the named
+`cairn-cve-data` volume. Project worker containers mount the current data when
+`dispatch.yaml` contains the volume mapping shown in `dispatch.example.yaml`.
+The updater also enriches matching records with CISA Known Exploited
+Vulnerabilities metadata so workers can prioritize confirmed in-the-wild
+exploitation. It reads CISA's official `kev-data` GitHub mirror and retains the
+last valid local catalog when a refresh fails.
+NVD CVE API 2.0 enrichment adds NVD CVSS, status, and CPE applicability data.
+The first run resumes by page if interrupted; later runs request only modified
+records. Set `NVD_API_KEY` before starting Compose for faster API synchronization.
+Workers can query it without scanning every JSON file:
+
+```bash
+cve-intel status
+cve-intel recommend --product "apache2" --version 2.4.49 --confidence 0.9
+cve-intel search --vendor Apache --product "HTTP Server" --version 2.4.49
+cve-intel show CVE-2024-3094
+```
+
+`recommend` normalizes common product aliases, ranks results using version
+applicability, CISA KEV, CVSS, publication state, and fingerprint confidence,
+and includes the reason for every score contribution. Only exact and affected
+range matches are marked applicable; product-only candidates remain explicitly
+unverified. Raw search results likewise distinguish exact and range matches from
+unverified candidates.
+
+Structured Facts also produce a deterministic project intelligence graph. It
+merges equivalent hosts and component aliases, links components to their target,
+tracks candidate/verified/rejected evidence and conflicts, and emits reusable
+CVE queries. The graph is included in the YAML export and is available from:
+
+```text
+GET /projects/{project_id}/intelligence
+```
+
+Reason and Explore receive this graph with the normal project snapshot, which
+lets later work reuse confirmed fingerprints and focus verification on the most
+relevant candidates.
+Existing project containers must be recreated once after enabling the mount.
  
 ### Manual
  
 ```bash
+# Use the same value in the server and dispatcher environments.
+export CAIRN_API_TOKEN="$(openssl rand -hex 32)"
+
 # Start the server
 uv run --project cairn cairn serve
  
@@ -193,6 +266,11 @@ uv run --project cairn cairn dispatch --config dispatch.yaml
 ```
 
 Local mode is selected by `runtime.execution: local` (see `dispatch.local.example.yaml`). On startup the dispatcher checks each configured worker CLI is installed and runnable, and reminds you they must already be logged in. Each project gets an isolated working directory under `local.workspace_root` (default: the dispatcher's current directory). Run the dispatcher directly on the host — not inside Docker — since the agents run with your user's permissions and no sandbox.
+
+Container mode supports `memory_limit`, `cpu_limit`, `pids_limit`, `cap_drop`,
+`read_only`, `security_opt`, and `tmpfs` under the `container` configuration.
+The example configuration enables resource ceilings and documents stricter
+options for workers that do not need sudo or runtime package installation.
 
 ### Tests
 

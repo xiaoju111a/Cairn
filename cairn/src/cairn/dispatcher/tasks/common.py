@@ -4,6 +4,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.protocol.client import CairnClient
@@ -147,21 +148,23 @@ def write_conclude_result(
     project_id: str,
     intent_id: str,
     worker_name: str,
-    description: str,
+    finding: str | dict[str, Any],
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    status: str = "candidate",
 ) -> str:
     return write_conclude_result_with_fact_id(
         client,
         project_id,
         intent_id,
         worker_name,
-        description,
+        finding,
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
+        status=status,
     ).status
 
 
@@ -170,13 +173,15 @@ def write_conclude_result_with_fact_id(
     project_id: str,
     intent_id: str,
     worker_name: str,
-    description: str,
+    finding: str | dict[str, Any],
     *,
     source: str,
     phase_ms: int,
     total_ms: int | None = None,
+    status: str = "candidate",
 ) -> ConcludeWriteResult:
-    response = client.conclude(project_id, intent_id, worker_name, description)
+    payload = {"description": finding} if isinstance(finding, str) else dict(finding)
+    response = client.conclude(project_id, intent_id, worker_name, payload, status=status)
     if response.ok:
         fact_id: str | None = None
         if isinstance(response.data, dict):

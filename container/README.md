@@ -1,3 +1,3 @@
-```
-docker build . -t cairn-worker-container
+```bash
+docker build --platform=linux/amd64 . -t cairn-worker-container:latest
 ```

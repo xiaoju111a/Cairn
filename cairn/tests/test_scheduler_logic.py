@@ -151,6 +151,38 @@ def test_new_fact_dispatches_reason_before_unclaimed_explore_intent() -> None:
     assert dispatched == [("reason", "facts:3->4")]
 
 
+def test_candidate_fact_dispatches_verify_before_reason_or_explore() -> None:
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    verify_intent = make_intent("i002")
+    verify_intent.from_ = ["f002"]
+    verify_intent.description = "verify:f002"
+    verify_intent.creator = "dispatcher.verify"
+    verify_intent.worker = None
+    project = make_project(intents=[make_intent(), verify_intent])
+    project.intents[0].worker = None
+    candidate = Fact(id="f002", description="unverified result", status="candidate")
+    project.facts.append(candidate)
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(3, 1, 1)
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    dispatched: list[tuple[str, str]] = []
+    loop._dispatch_verify = lambda _project, _graph, fact, _intent: dispatched.append(("verify", fact.id)) or True
+    loop._dispatch_reason = lambda *_args: dispatched.append(("reason", "")) or True
+    loop._dispatch_explore = lambda *_args: dispatched.append(("explore", "")) or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == [("verify", "f002")]
+
+
 def test_initial_enabled_project_without_bootstrap_worker_dispatches_reason() -> None:
     loop = _loop()
     config = make_config()

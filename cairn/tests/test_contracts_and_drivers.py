@@ -8,6 +8,7 @@ from cairn.dispatcher.contracts import (
     parse_json_output,
     validate_explore_payload,
     validate_reason_payload,
+    validate_verify_payload,
 )
 from cairn.dispatcher.runtime.process import ManagedProcess
 from cairn.dispatcher.workers.adapters.pi import PiDriver
@@ -51,6 +52,52 @@ def test_reason_payload_requires_intent_when_none_are_open() -> None:
 def test_explore_payload_rejects_planning_text() -> None:
     with pytest.raises(ValueError):
         validate_explore_payload(parse_json_output("Need inspect files and keep working."))
+
+
+def test_explore_payload_preserves_structured_finding_evidence_and_attempts() -> None:
+    kind, finding = validate_explore_payload(
+        {
+            "accepted": True,
+            "data": {
+                "finding": {
+                    "description": "service is affected",
+                    "component": "example-server",
+                    "version": "1.2.3",
+                    "confidence": 0.85,
+                    "evidence": [
+                        {"kind": "http", "summary": "response reproduced", "artifact_path": "/tmp/proof.txt"}
+                    ],
+                },
+                "attempts": [
+                    {"action": "safe probe", "outcome": "success", "summary": "trigger observed"}
+                ],
+            },
+        }
+    )
+
+    assert kind == "fact"
+    assert finding["component"] == "example-server"
+    assert finding["confidence"] == 0.85
+    assert finding["evidence"][0]["kind"] == "http"
+    assert finding["attempts"][0]["outcome"] == "success"
+
+
+def test_verify_payload_requires_explicit_verdict_and_summary() -> None:
+    kind, result = validate_verify_payload(
+        {
+            "accepted": True,
+            "data": {
+                "verdict": "verified",
+                "summary": "independently reproduced",
+                "evidence": [{"kind": "observation", "summary": "same result"}],
+            },
+        }
+    )
+    assert kind == "verdict"
+    assert result["verdict"] == "verified"
+
+    with pytest.raises(ValueError, match="verdict"):
+        validate_verify_payload({"accepted": True, "data": {"summary": "missing verdict"}})
 
 
 def test_pi_driver_extracts_session_and_last_assistant_text() -> None:

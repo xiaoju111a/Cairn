@@ -13,7 +13,7 @@ When rejecting a task, return the following:
 
 Normal return example:
 ```json
-{"accepted": true, "data": {"description": "..."}}
+{"accepted":true,"data":{"finding":{"description":"...","confidence":0.5,"evidence":[{"kind":"observation","summary":"..."}]},"attempts":[{"action":"...","outcome":"inconclusive","summary":"..."}]}}
 ```
 
 # Rules
@@ -21,8 +21,9 @@ Normal return example:
 - Do not run any more commands, make any more tool calls, inspect anything else, wait for any unfinished command, or try to obtain any additional information.
 - Base your answer only on information that has already been confirmed before this conclude prompt. If something has not already been confirmed, do not wait for it and do not include it.
 - This JSON summary is your final output for this phase. After outputting it, stop.
-- `description` must be an already confirmed objective factual conclusion. Do not output plans, guesses, or explanatory filler. Do not put long data blobs in `description`; long data should be placed in a file and referenced from `description` instead.
-- `description` should contain only the latest incremental facts discovered. Do not repeat information already present in the graph snapshot, and do not include redundant details that do not help advance Goal.
+- `finding.description` must describe only what was observed so far. It will remain a candidate until independently verified.
+- Include available evidence and material attempts, including failures and inconclusive results.
+- Do not output plans, guesses, or explanatory filler. Store long data in a file and reference it with `artifact_path`.
 
 # Context
 ## Graph

@@ -39,13 +39,32 @@ tasks:
     timeout: 300
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
+  verify:
+    # Independent validation of candidate facts before Reason may use them.
+    timeout: 300
 
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  image: "cairn-worker-container:latest"
   network_mode: "host"
   # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
   completed_action: "stop"
+  # Resource ceilings keep a runaway scanner or browser from exhausting the Docker host.
+  memory_limit: "8g"
+  cpu_limit: 4
+  pids_limit: 2048
+  # Optional hardening for workers that do not need sudo or runtime package installation:
+  # read_only: true
+  # cap_drop: ["ALL"]
+  # security_opt: ["no-new-privileges:true"]
+  # tmpfs:
+  #   /tmp: "rw,noexec,nosuid,size=1g"
+  # Shared official CVE List, maintained by the cairn-cve-updater Compose service.
+  # The fixed Docker volume name is declared at the bottom of docker-compose.yaml.
+  volumes:
+    cairn-cve-data:
+      bind: "/home/kali/cve"
+      mode: "ro"
   # Add Linux capabilities only when a task truly needs them, such as packet crafting or network admin actions.
   # cap_add:
   #   - "NET_RAW"
@@ -57,7 +76,7 @@ workers:
   # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
   - name: "claudecode_deepseek-v4-pro"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, explore, verify]
     max_running: 2
     priority: 0
     env:
@@ -67,7 +86,7 @@ workers:
 
   # - name: "codex_qwen3.6-plus"
   #   type: "codex"
-  #   task_types: [bootstrap,reason,explore]
+  #   task_types: [bootstrap,reason,explore,verify]
   #   max_running: 2
   #   priority: 0
   #   env:
@@ -77,7 +96,7 @@ workers:
 
   # - name: "pi_qwen3.6-plus"
   #   type: "pi"
-  #   task_types: [bootstrap,reason,explore]
+  #   task_types: [bootstrap,reason,explore,verify]
   #   max_running: 2
   #   priority: 0
   #   env:

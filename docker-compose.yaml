@@ -1,4 +1,40 @@
 services:
+  cairn-cve-updater:
+    build:
+      context: .
+      dockerfile: container/cve-intel.Dockerfile
+    image: cairn-cve-intel
+    container_name: cairn-cve-updater
+    command:
+      - sync
+      - --repository
+      - /data/cvelistV5
+      - --database
+      - /data/cve-index.sqlite3
+      - --kev-file
+      - /data/cisa-kev.json
+      - --nvd
+      - --interval
+      - "3600"
+    volumes:
+      - cairn-cve-data:/data
+    environment:
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+    healthcheck:
+      test:
+        - CMD
+        - cve-intel
+        - health
+        - --database
+        - /data/cve-index.sqlite3
+        - --max-age
+        - "7200"
+      interval: 10s
+      timeout: 5s
+      retries: 180
+      start_period: 5s
+    restart: unless-stopped
+
   cairn-server:
     build:
       context: .
@@ -6,7 +42,9 @@ services:
     image: cairn-app
     container_name: cairn-server
     ports:
-      - "8000:8000"
+      - "${CAIRN_BIND_HOST:-127.0.0.1}:8000:8000"
+    environment:
+      CAIRN_API_TOKEN: "${CAIRN_API_TOKEN:?set CAIRN_API_TOKEN before starting Cairn}"
     volumes:
       - ./datas/cairn/:/root/.local/share/cairn/
     healthcheck:
@@ -14,7 +52,7 @@ services:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 12
@@ -30,8 +68,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./dispatch.yaml:/cairn/dispatch.yaml
+    environment:
+      CAIRN_API_TOKEN: "${CAIRN_API_TOKEN:?set CAIRN_API_TOKEN before starting Cairn}"
     depends_on:
       cairn-server:
         condition: service_healthy
+      cairn-cve-updater:
+        condition: service_healthy
     restart: unless-stopped
     command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]
+
+volumes:
+  cairn-cve-data:
+    name: cairn-cve-data

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import secrets
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from cairn.server.models import Intent, ProjectMeta, ProjectReason
+from cairn.server.models import AttemptInput, Evidence, EvidenceInput, Fact, Intent, ProjectMeta, ProjectReason
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -87,6 +89,19 @@ def validate_facts_exist(
             raise HTTPException(404, f"Fact {fid} not found")
 
 
+def validate_facts_verified(
+    conn: sqlite3.Connection, project_id: str, fact_ids: list[str]
+) -> None:
+    for fid in fact_ids:
+        row = conn.execute(
+            "SELECT status FROM facts WHERE id = ? AND project_id = ?", (fid, project_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"Fact {fid} not found")
+        if row["status"] != "verified":
+            raise HTTPException(409, f"Fact {fid} is {row['status']} and cannot support completion")
+
+
 def validate_goal_not_in_sources(fact_ids: list[str]) -> None:
     if "goal" in fact_ids:
         raise HTTPException(400, "goal cannot be used in from")
@@ -109,8 +124,21 @@ def get_intent_or_404(
     return row
 
 
+def new_lease_id() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def require_matching_lease(stored: str | None, supplied: str | None, *, scope: str) -> None:
+    if stored is None or supplied is None or not secrets.compare_digest(stored, supplied):
+        raise HTTPException(409, f"{scope} lease is no longer valid")
+
+
 def get_claimable_open_intent_or_404(
-    conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
+    conn: sqlite3.Connection,
+    project_id: str,
+    intent_id: str,
+    worker: str,
+    lease_id: str | None = None,
 ) -> sqlite3.Row:
     expire_workers(conn, project_id)
     row = get_intent_or_404(conn, project_id, intent_id)
@@ -118,11 +146,17 @@ def get_claimable_open_intent_or_404(
         raise HTTPException(409, "Intent already concluded")
     if row["worker"] is not None and row["worker"] != worker:
         raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
+    if row["worker"] is not None:
+        require_matching_lease(row["lease_id"], lease_id, scope="Intent")
     return row
 
 
 def get_releasable_open_intent_or_404(
-    conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
+    conn: sqlite3.Connection,
+    project_id: str,
+    intent_id: str,
+    worker: str,
+    lease_id: str | None = None,
 ) -> sqlite3.Row:
     expire_workers(conn, project_id)
     row = get_intent_or_404(conn, project_id, intent_id)
@@ -132,6 +166,7 @@ def get_releasable_open_intent_or_404(
         return row
     if row["worker"] != worker:
         raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
+    require_matching_lease(row["lease_id"], lease_id, scope="Intent")
     return row
 
 
@@ -163,6 +198,76 @@ def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str)
         created_at=row["created_at"],
         concluded_at=row["concluded_at"],
     )
+
+
+def fact_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Fact:
+    evidence_rows = conn.execute(
+        "SELECT id, kind, summary, artifact_path, source_url, created_at FROM evidence "
+        "WHERE project_id = ? AND fact_id = ? ORDER BY created_at, id",
+        (project_id, row["id"]),
+    ).fetchall()
+    payload = dict(row)
+    payload.pop("project_id", None)
+    payload["evidence"] = [Evidence(**dict(item)) for item in evidence_rows]
+    return Fact(**payload)
+
+
+def insert_evidence(
+    conn: sqlite3.Connection,
+    project_id: str,
+    fact_id: str,
+    entries: list[EvidenceInput],
+    *,
+    created_at: str,
+) -> None:
+    for entry in entries:
+        conn.execute(
+            """
+            INSERT INTO evidence
+                (id, project_id, fact_id, kind, summary, artifact_path, source_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"ev_{uuid.uuid4().hex}",
+                project_id,
+                fact_id,
+                entry.kind,
+                entry.summary,
+                entry.artifact_path,
+                entry.source_url,
+                created_at,
+            ),
+        )
+
+
+def insert_attempts(
+    conn: sqlite3.Connection,
+    project_id: str,
+    intent_id: str,
+    worker: str,
+    entries: list[AttemptInput],
+    *,
+    created_at: str,
+) -> None:
+    for entry in entries:
+        conn.execute(
+            """
+            INSERT INTO attempts
+                (id, project_id, intent_id, worker, action, outcome, summary, artifact_path, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"at_{uuid.uuid4().hex}",
+                project_id,
+                intent_id,
+                worker,
+                entry.action,
+                entry.outcome,
+                entry.summary,
+                entry.artifact_path,
+                created_at,
+            ),
+        )
 
 
 def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
@@ -212,7 +317,8 @@ def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
         SET reason_worker = NULL,
             reason_trigger = NULL,
             reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
+            reason_last_heartbeat_at = NULL,
+            reason_lease_id = NULL
         WHERE id = ?
         """,
         (project_id,),
@@ -224,7 +330,8 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
     now = utcnow()
     query = """
         UPDATE intents
-        SET worker = NULL
+        SET worker = NULL,
+            lease_id = NULL
         WHERE to_fact_id IS NULL
           AND worker IS NOT NULL
           AND last_heartbeat_at IS NOT NULL
@@ -245,7 +352,8 @@ def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None
         SET reason_worker = NULL,
             reason_trigger = NULL,
             reason_started_at = NULL,
-            reason_last_heartbeat_at = NULL
+            reason_last_heartbeat_at = NULL,
+            reason_lease_id = NULL
         WHERE reason_worker IS NOT NULL
           AND reason_last_heartbeat_at IS NOT NULL
           AND (julianday(?) - julianday(reason_last_heartbeat_at)) * 86400 > ?

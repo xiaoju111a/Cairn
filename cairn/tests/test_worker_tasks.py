@@ -6,7 +6,7 @@ from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.workers.health import HealthResult
-from cairn.dispatcher.tasks import bootstrap, explore, reason
+from cairn.dispatcher.tasks import bootstrap, explore, reason, verify
 
 from conftest import (
     FakeClient,
@@ -99,7 +99,9 @@ def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
     )
 
     assert outcome == "success"
-    assert client.concluded == [("proj_001", "i001", "test-worker", "confirmed fact")]
+    assert client.concluded == [
+        ("proj_001", "i001", "test-worker", {"description": "confirmed fact", "evidence": [], "attempts": []})
+    ]
     assert len(containers.writes) == 2
     assert "/explore_execute-" in containers.writes[0][1]
     assert "/explore_conclude-" in containers.writes[1][1]
@@ -171,8 +173,64 @@ def test_bootstrap_success_concludes_fact_then_completes_project(monkeypatch) ->
     )
 
     assert outcome == "success"
-    assert client.concluded == [("proj_001", "i001", "test-worker", "solved")]
+    assert client.concluded == [("proj_001", "i001", "test-worker", {"description": "solved"})]
     assert client.completed == [("proj_001", ["f002"], "goal met", "test-worker")]
+    assert lease.started and lease.stopped
+
+
+def test_verify_task_writes_independent_verdict_with_evidence(monkeypatch) -> None:
+    config = make_config()
+    intent = make_intent("i002")
+    intent.from_ = ["f002"]
+    intent.description = "verify:f002"
+    intent.creator = "dispatcher.verify"
+    project = make_project(intents=[intent])
+    candidate = project.facts[-1].model_copy(
+        update={"id": "f002", "description": "candidate result", "status": "candidate"}
+    )
+    project.facts.append(candidate)
+    client = FakeClient(project)
+    containers = FakeContainerManager()
+    driver = FakeDriver()
+    lease = FakeLease()
+
+    monkeypatch.setattr(verify, "get_driver", lambda *_a, **_k: driver)
+    monkeypatch.setattr(verify.HeartbeatLease, "for_intent", _lease_factory(lease))
+    monkeypatch.setattr(
+        verify,
+        "run_worker_process",
+        lambda *_args, **_kwargs: ProcessResult(
+            0,
+            '{"accepted":true,"data":{"verdict":"verified","summary":"reproduced",'
+            '"evidence":[{"kind":"observation","summary":"same result"}]}}',
+            "",
+        ),
+    )
+
+    outcome = verify.run_verify_task(
+        config,
+        client,
+        containers,
+        project,
+        "facts: []",
+        candidate,
+        intent,
+        config.workers[0],
+        TaskCancellation(),
+    )
+
+    assert outcome == "success"
+    assert client.verified == [
+        (
+            "proj_001",
+            "f002",
+            "i002",
+            "test-worker",
+            "verified",
+            "reproduced",
+            [{"kind": "observation", "summary": "same result"}],
+        )
+    ]
     assert lease.started and lease.stopped
 
 

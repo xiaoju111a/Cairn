@@ -378,6 +378,7 @@ def _try_conclude_fallback(
         fact_description,
         source="bootstrap_conclude",
         phase_ms=conclude_ms,
+        status="verified",
     )
 
 
@@ -420,6 +421,7 @@ def _write_bootstrap_complete_result(
         source=source,
         phase_ms=phase_ms,
         total_ms=total_ms,
+        status="verified",
     )
     if conclude.status != "success":
         return "failed"

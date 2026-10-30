@@ -227,6 +227,7 @@ def _local_payload() -> dict:
             "bootstrap": {"timeout": 10, "conclude_timeout": 5},
             "reason": {"timeout": 10, "max_intents": 3},
             "explore": {"timeout": 10, "conclude_timeout": 5},
+            "verify": {"timeout": 10},
         },
         "workers": [
             {"name": "local-claude", "type": "claudecode", "task_types": ["explore"], "max_running": 1, "priority": 0},
@@ -371,6 +372,7 @@ def _local_config_for_worker(name: str, worker_type: str) -> DispatchConfig:
                 "bootstrap": {"timeout": 30, "conclude_timeout": 10},
                 "reason": {"timeout": 30, "max_intents": 3},
                 "explore": {"timeout": 30, "conclude_timeout": 10},
+                "verify": {"timeout": 30},
             },
             "workers": [
                 {"name": name, "type": worker_type, "task_types": ["explore"], "max_running": 1, "priority": 0}
@@ -417,7 +419,9 @@ def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> 
     )
 
     assert outcome == "success"
-    assert client.concluded == [("proj_001", "i001", "test-worker", "local fake fact")]
+    assert client.concluded == [
+        ("proj_001", "i001", "test-worker", {"description": "local fake fact", "evidence": [], "attempts": []})
+    ]
     # graph snapshot was materialised on the host under the patched root
     snapshot_root = tmp_path / "prompts"
     assert any(p.name == "graph.yaml" for p in snapshot_root.rglob("*"))

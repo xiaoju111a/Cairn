@@ -34,6 +34,8 @@ tasks:
   explore:
     timeout: 600
     conclude_timeout: 120
+  verify:
+    timeout: 300
 
 # Optional. If omitted: workspace_root defaults to the dispatcher's current directory,
 # completed_action defaults to keep. Each project gets an isolated <workspace_root>/<project_id>/.
@@ -54,7 +56,7 @@ local:
 workers:
   - name: "local-claude"
     type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+    task_types: [bootstrap, reason, explore, verify]
     max_running: 1
     priority: 0
 

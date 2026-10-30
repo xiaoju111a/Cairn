@@ -4,6 +4,7 @@ import json
 
 import pytest
 from pydantic import ValidationError
+import yaml
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig, validate_prompt_resources
 from cairn.dispatcher.workers.adapters.codex import CodexDriver
@@ -23,6 +24,34 @@ def test_dispatch_config_merges_common_env_with_worker_override() -> None:
     assert config.workers[0].env["OVERRIDE"] == "worker"
 
 
+def test_dispatch_config_expands_environment_secret_references(tmp_path, monkeypatch) -> None:
+    payload = make_config().model_dump()
+    payload["common_env"] = {
+        "SECRET": "${CAIRN_TEST_SECRET}",
+        "WITH_DEFAULT": "${CAIRN_TEST_MISSING:-fallback}",
+    }
+    path = tmp_path / "dispatch.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.setenv("CAIRN_TEST_SECRET", "resolved-secret")
+    monkeypatch.delenv("CAIRN_TEST_MISSING", raising=False)
+
+    config = DispatchConfig.load(path)
+
+    assert config.workers[0].env["SECRET"] == "resolved-secret"
+    assert config.workers[0].env["WITH_DEFAULT"] == "fallback"
+
+
+def test_dispatch_config_rejects_missing_required_environment_reference(tmp_path, monkeypatch) -> None:
+    payload = make_config().model_dump()
+    payload["common_env"] = {"SECRET": "${CAIRN_TEST_REQUIRED_SECRET}"}
+    path = tmp_path / "dispatch.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.delenv("CAIRN_TEST_REQUIRED_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="CAIRN_TEST_REQUIRED_SECRET"):
+        DispatchConfig.load(path)
+
+
 def test_dispatch_config_defaults_worker_healthcheck_and_rejects_unknown_mode() -> None:
     payload = make_config().model_dump()
     payload["runtime"].pop("worker_healthcheck")
@@ -30,6 +59,29 @@ def test_dispatch_config_defaults_worker_healthcheck_and_rejects_unknown_mode() 
     assert DispatchConfig.model_validate(payload).runtime.worker_healthcheck == "startup_only"
 
     payload["runtime"]["worker_healthcheck"] = "sometimes"
+    with pytest.raises(ValidationError):
+        DispatchConfig.model_validate(payload)
+
+
+def test_dispatch_config_parses_read_only_container_volumes() -> None:
+    payload = make_config().model_dump()
+    payload["container"]["volumes"] = {
+        "cairn-cve-data": {"bind": "/home/kali/cve", "mode": "ro"}
+    }
+
+    config = DispatchConfig.model_validate(payload)
+
+    assert config.container is not None
+    assert config.container.volumes["cairn-cve-data"].bind == "/home/kali/cve"
+    assert config.container.volumes["cairn-cve-data"].mode == "ro"
+
+
+def test_dispatch_config_rejects_invalid_container_volume_mode() -> None:
+    payload = make_config().model_dump()
+    payload["container"]["volumes"] = {
+        "cairn-cve-data": {"bind": "/home/kali/cve", "mode": "execute"}
+    }
+
     with pytest.raises(ValidationError):
         DispatchConfig.model_validate(payload)
 

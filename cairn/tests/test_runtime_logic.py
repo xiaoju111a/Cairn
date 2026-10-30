@@ -37,6 +37,20 @@ class FakeContainer:
         return self.archive_result
 
 
+class FakeContainers:
+    def __init__(self) -> None:
+        self.runs: list[tuple[tuple, dict]] = []
+
+    def run(self, *args, **kwargs) -> object:
+        self.runs.append((args, kwargs))
+        return object()
+
+
+class FakeDockerClient:
+    def __init__(self) -> None:
+        self.containers = FakeContainers()
+
+
 def _manager(*, completed_action: str = "stop") -> ContainerManager:
     manager = ContainerManager.__new__(ContainerManager)
     manager._config = ContainerConfig(
@@ -80,6 +94,43 @@ def test_container_manager_build_exec_process_wraps_command_with_timeout() -> No
 
     assert process.command == ["timeout", "-k", "5s", "300s", "agent", "-p", "prompt"]
     assert process.env == {"A": "B"}
+
+
+def test_container_manager_mounts_configured_volumes_when_creating_container() -> None:
+    manager = _manager()
+    manager._config = ContainerConfig.model_validate(
+        {
+            "image": "image",
+            "network_mode": "host",
+            "completed_action": "stop",
+            "volumes": {
+                "cairn-cve-data": {"bind": "/home/kali/cve", "mode": "ro"}
+            },
+            "memory_limit": "2g",
+            "cpu_limit": 1.5,
+            "pids_limit": 256,
+            "read_only": True,
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "tmpfs": {"/tmp": "rw,size=64m"},
+        }
+    )
+    manager._client = FakeDockerClient()
+    manager.inspect_state = lambda _name: None
+
+    assert manager._ensure_running_locked("proj_001", "cairn-dispatch-proj_001") == "cairn-dispatch-proj_001"
+
+    _args, kwargs = manager._client.containers.runs[0]
+    assert kwargs["volumes"] == {
+        "cairn-cve-data": {"bind": "/home/kali/cve", "mode": "ro"}
+    }
+    assert kwargs["mem_limit"] == "2g"
+    assert kwargs["nano_cpus"] == 1_500_000_000
+    assert kwargs["pids_limit"] == 256
+    assert kwargs["read_only"] is True
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert kwargs["security_opt"] == ["no-new-privileges:true"]
+    assert kwargs["tmpfs"] == {"/tmp": "rw,size=64m"}
 
 
 def test_completed_container_stop_action_only_stops_running_container() -> None:

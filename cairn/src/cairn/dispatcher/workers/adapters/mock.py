@@ -112,9 +112,20 @@ if phase=="bootstrap_conclude":
         print(json.dumps({"accepted":True,"data":{"complete":{"description":"mock invalid payload"}}}, ensure_ascii=False))
     raise SystemExit(0)
 
+if phase=="verify":
+    if outcome=="verified":
+        print(json.dumps({"accepted":True,"data":{"verdict":"verified","summary":f"mock independently verified {prompt.get('fact_id')}","evidence":[{"kind":"observation","summary":"mock verification evidence"}]}}, ensure_ascii=False))
+    elif outcome=="rejected_finding":
+        print(json.dumps({"accepted":True,"data":{"verdict":"rejected","summary":f"mock rejected {prompt.get('fact_id')}","evidence":[]}}, ensure_ascii=False))
+    elif outcome=="rejected":
+        print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
+    else:
+        print(json.dumps({"accepted":True,"data":{"summary":"mock invalid verify payload"}}, ensure_ascii=False))
+    raise SystemExit(0)
+
 if outcome=="fact":
     label = prompt.get("intent_id") or phase
-    print(json.dumps({"accepted":True,"data":{"description":f"mock fact for {label}"}} , ensure_ascii=False))
+    print(json.dumps({"accepted":True,"data":{"finding":{"description":f"mock fact for {label}","confidence":0.8,"evidence":[{"kind":"observation","summary":"mock exploration evidence"}]},"attempts":[{"action":"mock explore","outcome":"success","summary":"mock attempt completed"}]}} , ensure_ascii=False))
 elif outcome=="rejected":
     print(json.dumps({"accepted":False,"reason":"mock_rejected"}, ensure_ascii=False))
 else:

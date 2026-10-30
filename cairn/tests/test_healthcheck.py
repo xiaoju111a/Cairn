@@ -159,6 +159,7 @@ def test_run_startup_healthchecks_reports_each_worker() -> None:
                 "bootstrap": {"timeout": 10, "conclude_timeout": 5},
                 "reason": {"timeout": 10, "max_intents": 3},
                 "explore": {"timeout": 10, "conclude_timeout": 5},
+                "verify": {"timeout": 10},
             },
             "container": {"image": "img", "network_mode": "host", "completed_action": "stop"},
             "workers": [

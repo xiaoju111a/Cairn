@@ -37,6 +37,9 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 - Each Intent should be a high-value exploration direction. It does not need to be overly detailed. Focus on the core insight and a clear direction. Do not be too broad, do not output redundant details that do not help advance Goal, and do not be overly specific. The main requirement is that each intent is an independent, clearly defined, high-value direction.
 - An Intent may originate from multiple facts.
 - Different intents should cover different exploration dimensions and avoid duplication or heavy overlap.
+- Use `asset_intelligence.entities` and `asset_intelligence.relationships` to avoid rediscovering the same host or component under different spellings. Treat conflicted entities as unresolved and propose an intent that can settle the conflict.
+- When `asset_intelligence.cve_queries` contains a component query, prioritize confirming the fingerprint and investigating high-value CVE candidates. A relevance score only prioritizes review; it is never proof that a target is vulnerable.
+- Exact or affected-range CVE matches, CISA KEV status, and high CVSS can raise investigation priority. Completion still requires a verified Fact with direct applicability evidence.
 
 ## Context
 ### Graph

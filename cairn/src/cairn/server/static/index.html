@@ -646,6 +646,27 @@
             </div>
             <div class="p-4 space-y-4">
               <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedFactRecord().description"></p>
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wider"
+                  :class="factStatusClass(selectedFactRecord().status)" x-text="selectedFactRecord().status || 'verified'"></span>
+                <span x-show="selectedFactRecord().confidence !== null && selectedFactRecord().confidence !== undefined"
+                  class="text-[11px] text-slate-400" x-text="`confidence ${Math.round(selectedFactRecord().confidence * 100)}%`"></span>
+              </div>
+              <template x-if="selectedFactRecord().verification_summary">
+                <div class="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600" x-text="selectedFactRecord().verification_summary"></div>
+              </template>
+              <template x-if="selectedFactRecord().evidence && selectedFactRecord().evidence.length">
+                <div class="pt-3 border-t border-slate-100 space-y-2">
+                  <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Evidence</p>
+                  <template x-for="item in selectedFactRecord().evidence" :key="item.id">
+                    <div class="rounded-xl border border-slate-100 p-3 text-xs">
+                      <span class="font-semibold text-slate-500" x-text="item.kind"></span>
+                      <p class="mt-1 text-slate-600 whitespace-pre-wrap break-words" x-text="item.summary"></p>
+                      <p x-show="item.artifact_path || item.source_url" class="mt-1 font-mono text-[10px] text-slate-400 break-all" x-text="item.artifact_path || item.source_url"></p>
+                    </div>
+                  </template>
+                </div>
+              </template>
               <div class="space-y-3 text-xs">
                 <template x-if="selectedFactId() === 'origin'">
                   <div class="pt-4 border-t border-slate-100">
@@ -1132,6 +1153,8 @@ function cairnApp() {
     projectListScrollTop: 0,
     shouldRestoreProjectListScroll: false,
     isStoppingAllProjects: false,
+    apiToken: '',
+    intentLeases: {},
 
     async init() {
       this._panelResizeMove = (e) => this.onPanelResize(e);
@@ -1139,6 +1162,7 @@ function cairnApp() {
       window.addEventListener('pointermove', this._panelResizeMove);
       window.addEventListener('pointerup', this._panelResizeStop);
       this.loadLocalPrefs();
+      this.loadAuthState();
       await this.loadProjects();
       await this.loadSettings();
       this.startPolling();
@@ -1160,32 +1184,76 @@ function cairnApp() {
     },
 
     async api(method, path, body) {
-      const opts = { method, headers: { 'Content-Type': 'application/json' } };
-      if (body) opts.body = JSON.stringify(body);
-      const r = await fetch(path, opts);
-      if (r.status === 204) return null;
-      const data = await r.json();
-      if (!r.ok) {
-        let msg = `HTTP ${r.status}`;
-        if (typeof data.detail === 'string') msg = data.detail;
-        else if (Array.isArray(data.detail)) msg = data.detail.map(e => e.msg).join('; ');
-        throw new Error(msg);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.apiToken) headers.Authorization = `Bearer ${this.apiToken}`;
+        const payload = body ? { ...body } : null;
+        const match = path.match(/^\/projects\/([^/]+)\/intents\/([^/]+)\/(heartbeat|release|conclude)$/);
+        if (payload && match) {
+          const lease = this.intentLeases[`${match[1]}:${match[2]}`];
+          if (lease) payload.lease_id = lease;
+        }
+        const opts = { method, headers };
+        if (payload) opts.body = JSON.stringify(payload);
+        const r = await fetch(path, opts);
+        if (r.status === 401 && attempt === 0 && this.requestApiToken()) continue;
+        if (r.status === 204) return null;
+        const data = await r.json();
+        if (!r.ok) {
+          let msg = `HTTP ${r.status}`;
+          if (typeof data.detail === 'string') msg = data.detail;
+          else if (Array.isArray(data.detail)) msg = data.detail.map(e => e.msg).join('; ');
+          throw new Error(msg);
+        }
+        const leaseId = r.headers.get('X-Cairn-Lease-Id');
+        let leaseProject = match?.[1];
+        let leaseIntent = match?.[2];
+        if (!leaseIntent && leaseId && data?.id && path.match(/^\/projects\/([^/]+)\/intents$/)) {
+          leaseProject = path.split('/')[2];
+          leaseIntent = data.id;
+        }
+        if (leaseId && leaseProject && leaseIntent) {
+          this.intentLeases[`${leaseProject}:${leaseIntent}`] = leaseId;
+          localStorage.setItem('cairn.intentLeases', JSON.stringify(this.intentLeases));
+        }
+        if (match && (match[3] === 'release' || match[3] === 'conclude')) {
+          delete this.intentLeases[`${match[1]}:${match[2]}`];
+          localStorage.setItem('cairn.intentLeases', JSON.stringify(this.intentLeases));
+        }
+        return data;
       }
-      return data;
     },
 
     async fetchText(path) {
-      const r = await fetch(path);
-      const text = await r.text();
-      if (!r.ok) {
-        let detail = text;
-        try {
-          const data = JSON.parse(text);
-          detail = data.detail || text;
-        } catch {}
-        throw new Error(detail || `HTTP ${r.status}`);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const headers = this.apiToken ? { Authorization: `Bearer ${this.apiToken}` } : {};
+        const r = await fetch(path, { headers });
+        if (r.status === 401 && attempt === 0 && this.requestApiToken()) continue;
+        const text = await r.text();
+        if (!r.ok) {
+          let detail = text;
+          try {
+            const data = JSON.parse(text);
+            detail = data.detail || text;
+          } catch {}
+          throw new Error(detail || `HTTP ${r.status}`);
+        }
+        return text;
       }
-      return text;
+    },
+
+    loadAuthState() {
+      this.apiToken = localStorage.getItem('cairn.apiToken') || '';
+      try { this.intentLeases = JSON.parse(localStorage.getItem('cairn.intentLeases') || '{}'); }
+      catch { this.intentLeases = {}; }
+    },
+
+    requestApiToken() {
+      const token = window.prompt('Enter the Cairn API token');
+      if (!token) return false;
+      this.apiToken = token.trim();
+      localStorage.setItem('cairn.apiToken', this.apiToken);
+      return Boolean(this.apiToken);
     },
 
     showToast(msg, type = 'info') {
@@ -1294,17 +1362,25 @@ function cairnApp() {
       );
     },
 
+    isVerifyIntent(intent) {
+      return Boolean(intent && intent.creator === 'dispatcher.verify' && String(intent.description || '').startsWith('verify:'));
+    },
+
     openIntentNodeType(intent) {
       if (this.isBootstrapIntent(intent)) return intent.worker ? 'bootstrap_running' : 'bootstrap_pending';
+      if (this.isVerifyIntent(intent)) return intent.worker ? 'verify_running' : 'verify_pending';
       return intent.worker ? 'in_progress' : 'unclaimed';
     },
 
     openIntentNodeLabel(intent) {
-      return this.isBootstrapIntent(intent) ? 'Bootstrap' : '?';
+      if (this.isBootstrapIntent(intent)) return 'Bootstrap';
+      if (this.isVerifyIntent(intent)) return 'Verify';
+      return '?';
     },
 
     openIntentNodeSize(intent) {
       if (this.isBootstrapIntent(intent)) return { width: 82, height: 30 };
+      if (this.isVerifyIntent(intent)) return { width: 62, height: 28 };
       return { width: 22, height: 22 };
     },
 
@@ -1325,7 +1401,17 @@ function cairnApp() {
     },
 
     canActOnSelectedFacts() {
-      return this.projectIsActive() && this.selectedFacts.length > 0 && !this.selectedFacts.includes('goal');
+      if (!this.projectIsActive() || this.selectedFacts.length === 0 || this.selectedFacts.includes('goal')) return false;
+      const byId = new Map((this.project?.facts || []).map(fact => [fact.id, fact]));
+      return this.selectedFacts.every(id => (byId.get(id)?.status || 'verified') === 'verified');
+    },
+
+    factStatusClass(status) {
+      return {
+        verified: 'bg-emerald-50 text-emerald-700',
+        candidate: 'bg-amber-50 text-amber-700',
+        rejected: 'bg-rose-50 text-rose-700',
+      }[status || 'verified'] || 'bg-slate-100 text-slate-600';
     },
 
     async loadProjects() {
@@ -2141,7 +2227,7 @@ function cairnApp() {
       const nodes = [];
       const edges = [];
       for (const f of this.project.facts) {
-        const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : 'fact';
+        const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : (f.status === 'candidate' ? 'candidate_fact' : f.status === 'rejected' ? 'rejected_fact' : 'fact');
         const label = this.summarizeFactLabel(f);
         const size = this.factNodeSize(label, nodeType);
         nodes.push({ data: {
@@ -2209,16 +2295,21 @@ function cairnApp() {
         { selector: 'node[nodeType="origin"]', style: { ...common, shape:'round-rectangle','background-color':'#14b8a6',label:'data(label)',color:'#fff','font-size':'11px','font-weight':'bold','text-wrap':'wrap','text-max-width':'92px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
         { selector: 'node[nodeType="goal"]', style: { ...common, shape:'round-rectangle','background-color':'#f43f5e',label:'data(label)',color:'#fff','font-size':'11px','font-weight':'bold','text-wrap':'wrap','text-max-width':'92px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
         { selector: 'node[nodeType="fact"]', style: { ...common, shape:'round-rectangle','background-color':'#6366f1',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':0 }},
+        { selector: 'node[nodeType="candidate_fact"]', style: { ...common, shape:'round-rectangle','background-color':'#f59e0b',label:'data(label)',color:'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#fbbf24','border-style':'dashed' }},
+        { selector: 'node[nodeType="rejected_fact"]', style: { ...common, shape:'round-rectangle','background-color':'#94a3b8',label:'data(label)',color:'#f8fafc','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere',width:'data(width)',height:'data(height)','border-width':1,'border-color':'#64748b','opacity':0.7 }},
         { selector: 'node[nodeType="in_progress"]', style: { ...common, shape:'ellipse','background-color':'#f59e0b','background-opacity':0.8,label:'?',color:'#fff','font-size':'11px','font-weight':'bold',width:22,height:22,'border-width':2,'border-color':'#d97706' }},
         { selector: 'node[nodeType="unclaimed"]', style: { ...common, shape:'ellipse','background-color':'#cbd5e1','background-opacity':0.5,label:'?',color:'#94a3b8','font-size':'11px','font-weight':'bold',width:20,height:20,'border-width':1.5,'border-color':'#94a3b8','border-style':'dashed' }},
         { selector: 'node[nodeType="bootstrap_pending"]', style: { ...common, shape:'round-rectangle','background-color':'#fff7ed','background-opacity':0.96,label:'data(label)',color:'#c2410c','font-size':'10px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':1.5,'border-color':'#fdba74','border-style':'dashed','text-wrap':'wrap','text-max-width':'70px' }},
         { selector: 'node[nodeType="bootstrap_running"]', style: { ...common, shape:'round-rectangle','background-color':'#fb923c','background-opacity':0.96,label:'data(label)',color:'#fff7ed','font-size':'10px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#ea580c','text-wrap':'wrap','text-max-width':'70px' }},
+        { selector: 'node[nodeType="verify_pending"]', style: { ...common, shape:'round-rectangle','background-color':'#fffbeb',label:'data(label)',color:'#b45309','font-size':'9px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':1.5,'border-color':'#f59e0b','border-style':'dashed' }},
+        { selector: 'node[nodeType="verify_running"]', style: { ...common, shape:'round-rectangle','background-color':'#f59e0b',label:'data(label)',color:'#fff','font-size':'9px','font-weight':'bold',width:'data(width)',height:'data(height)','border-width':2,'border-color':'#d97706' }},
 
         { selector: 'edge[status="concluded"]', style: { width:2,'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="in_progress"]', style: { width:2,'line-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fbbf24','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#b45309','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#fffbeb','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.9 }},
         { selector: 'edge[status="unclaimed"]', style: { width:1.5,'line-color':'#cbd5e1','line-style':'dashed','line-dash-pattern':[5,5],'target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#94a3b8','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'80px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.85,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.7 }},
         { selector: 'edge[status="bootstrap_pending"]', style: { width:2,'line-color':'#fdba74','line-style':'dashed','line-dash-pattern':[8,4],'line-dash-offset':0,'target-arrow-color':'#fdba74','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#c2410c','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis','text-background-color':'#fff7ed','text-background-opacity':0.92,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.85 }},
         { selector: 'edge[status="bootstrap_running"]', style: { width:2.5,'line-color':'#fb923c','line-style':'dashed','line-dash-pattern':[10,4],'line-dash-offset':0,'target-arrow-color':'#fb923c','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#c2410c','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis','text-background-color':'#fff7ed','text-background-opacity':0.92,'text-background-padding':'2px','text-events':'yes','arrow-scale':0.95 }},
+        { selector: 'edge[status="verify_pending"], edge[status="verify_running"]', style: { width:2,'line-color':'#f59e0b','line-style':'dashed','target-arrow-color':'#f59e0b','target-arrow-shape':'triangle','curve-style':'bezier',label:'data(label)','font-size':'7px',color:'#b45309','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'88px','text-wrap':'ellipsis' }},
         { selector: 'edge[edgeType="bootstrap_scope"]', style: { label:'',width:1.8,'curve-style':'bezier','line-style':'dotted','line-dash-pattern':[2,5],'target-arrow-shape':'triangle-backcurve','arrow-scale':0.75,'target-distance-from-node':2 }},
 
         { selector: '.highlight', style: { 'z-index':999 }},
@@ -2478,7 +2569,7 @@ function cairnApp() {
     },
 
     factNodeSize(label, nodeType) {
-      const preset = nodeType === 'fact'
+      const preset = ['fact', 'candidate_fact', 'rejected_fact'].includes(nodeType)
         ? { fontSize: 10, maxTextWidth: 116, minWidth: 52, minHeight: 34, paddingX: 10, paddingY: 10 }
         : { fontSize: 11, maxTextWidth: 92, minWidth: 58, minHeight: 38, paddingX: 10, paddingY: 10 };
 
@@ -3309,6 +3400,10 @@ function cairnApp() {
       try {
         const actor = this.actorName();
         const claiming = !intent.worker;
+        if (claiming) {
+          delete this.intentLeases[`${this.selectedProjectId}:${intent.id}`];
+          localStorage.setItem('cairn.intentLeases', JSON.stringify(this.intentLeases));
+        }
         await this.api('POST', `/projects/${this.selectedProjectId}/intents/${intent.id}/heartbeat`, { worker: actor });
         await this.loadProject(this.selectedProjectId);
         this.updateGraph();

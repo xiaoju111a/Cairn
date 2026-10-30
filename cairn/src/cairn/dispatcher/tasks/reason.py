@@ -88,9 +88,11 @@ def run_reason_task(
                 "worker": intent.worker,
             }
             for intent in project.intents
-            if intent.to is None
+            if intent.to is None and intent.creator not in {"dispatcher.bootstrap", "dispatcher.verify"}
         ]
-        allowed_fact_ids = [fact.id for fact in project.facts if fact.id != "goal"]
+        allowed_fact_ids = [
+            fact.id for fact in project.facts if fact.id != "goal" and fact.status == "verified"
+        ]
         LOG.debug(
             "reason context prepared project=%s worker=%s facts=%s allowed_fact_ids=%s hints=%s open_intents=%s",
             project.project.id,

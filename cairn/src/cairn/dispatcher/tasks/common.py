@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
@@ -68,6 +70,90 @@ def write_graph_snapshot_reference(
         f"{path}\n\n"
         "Before using the graph, read the entire file and treat its contents as the YAML snapshot "
         "for this Graph section."
+    )
+
+
+def write_explore_graph_reference(
+    container_manager: ContainerManager,
+    container_name: str,
+    graph_yaml: str,
+    *,
+    phase: str,
+    source_fact_ids: list[str],
+) -> str:
+    """Give Explore a small graph index while retaining complete records on disk."""
+    try:
+        graph = yaml.safe_load(graph_yaml)
+    except yaml.YAMLError:
+        graph = None
+    if not isinstance(graph, dict):
+        return write_graph_snapshot_reference(container_manager, container_name, graph_yaml, phase=phase)
+
+    root = f"{GRAPH_SNAPSHOT_ROOT}/{phase}-{uuid.uuid4().hex[:12]}"
+    full_path = f"{root}/graph.yaml"
+    container_manager.write_text_file(container_name, full_path, graph_yaml)
+
+    overview: dict[str, Any] = {
+        key: graph[key] for key in ("project", "hints") if key in graph
+    }
+    overview["current_intent_source_fact_ids"] = source_fact_ids
+
+    intelligence = graph.get("asset_intelligence")
+    if intelligence is not None:
+        intelligence_yaml = yaml.safe_dump(intelligence, allow_unicode=True, sort_keys=False)
+        if len(intelligence_yaml) > 8_000:
+            detail_path = f"{root}/asset_intelligence.yaml"
+            container_manager.write_text_file(container_name, detail_path, intelligence_yaml)
+            overview["asset_intelligence"] = {"detail_path": detail_path}
+        else:
+            overview["asset_intelligence"] = intelligence
+
+    source_ids = set(source_fact_ids)
+    overview["facts"] = []
+    for index, fact in enumerate(graph.get("facts", [])):
+        if not isinstance(fact, dict):
+            continue
+        entry = {
+            key: fact[key]
+            for key in ("id", "status", "category", "target", "component", "version", "confidence")
+            if key in fact
+        }
+        description = fact.get("description", "")
+        limit = 1_500 if fact.get("id") in source_ids else 320
+        truncated = isinstance(description, str) and len(description) > limit
+        entry["description"] = description[:limit].rstrip() + "…" if truncated else description
+        if truncated or fact.get("evidence") or fact.get("verification_summary"):
+            detail_path = f"{root}/fact-{index:04d}.yaml"
+            container_manager.write_text_file(
+                container_name,
+                detail_path,
+                yaml.safe_dump(fact, allow_unicode=True, sort_keys=False),
+            )
+            entry["detail_path"] = detail_path
+        overview["facts"].append(entry)
+
+    overview["intents"] = [
+        {
+            **{key: item[key] for key in ("from", "to") if key in item},
+            "description": str(item.get("description", ""))[:180],
+        }
+        for item in graph.get("intents", [])
+        if isinstance(item, dict)
+    ]
+    overview["intent_count"] = len(graph.get("intents", []))
+    overview["fact_count"] = len(graph.get("facts", []))
+    overview_path = f"{root}/overview.yaml"
+    container_manager.write_text_file(
+        container_name,
+        overview_path,
+        yaml.safe_dump(overview, allow_unicode=True, sort_keys=False),
+    )
+    return (
+        "Read the compact graph overview in this file first:\n\n"
+        f"{overview_path}\n\n"
+        "It includes the project goal, fact summaries, and intent links. Some descriptions are shortened. "
+        "Read a fact's detail_path when its full record matters. "
+        f"The complete original graph is at {full_path}; read it only if the overview and detail files are insufficient."
     )
 
 

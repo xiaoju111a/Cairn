@@ -19,7 +19,7 @@ from cairn.dispatcher.tasks.common import (
     run_worker_process,
     task_healthcheck_enabled,
     write_conclude_result,
-    write_graph_snapshot_reference,
+    write_explore_graph_reference,
 )
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import Intent, ProjectDetail
@@ -89,11 +89,12 @@ def run_explore_task(
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "explore.md"),
             {
-                "graph_yaml": write_graph_snapshot_reference(
+                "graph_yaml": write_explore_graph_reference(
                     container_manager,
                     container_name,
                     export_yaml.strip(),
                     phase="explore_execute",
+                    source_fact_ids=intent.from_,
                 ),
                 "intent_id": intent.id,
                 "intent_description": intent.description,
@@ -292,11 +293,12 @@ def _try_conclude_fallback(
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
         {
-            "graph_yaml": write_graph_snapshot_reference(
+            "graph_yaml": write_explore_graph_reference(
                 container_manager,
                 container_name,
                 export_yaml.strip(),
                 phase="explore_conclude",
+                source_fact_ids=intent.from_,
             ),
             "intent_id": intent.id,
             "intent_description": intent.description,

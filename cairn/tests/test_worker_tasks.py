@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import yaml
+
+from cairn.dispatcher.tasks.common import write_explore_graph_reference
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ProcessResult
@@ -102,12 +105,39 @@ def test_explore_early_plain_text_exit_uses_conclude_fallback(monkeypatch) -> No
     assert client.concluded == [
         ("proj_001", "i001", "test-worker", {"description": "confirmed fact", "evidence": [], "attempts": []})
     ]
-    assert len(containers.writes) == 2
+    assert len(containers.writes) == 4
     assert "/explore_execute-" in containers.writes[0][1]
-    assert "/explore_conclude-" in containers.writes[1][1]
+    assert "/explore_conclude-" in containers.writes[2][1]
     assert len(driver.execute_prompts) == 1
     assert len(driver.conclude_prompts) == 1
     assert lease.started and lease.stopped
+
+
+def test_explore_graph_overview_keeps_full_records_available() -> None:
+    containers = FakeContainerManager()
+    graph = {
+        "project": {"title": "test", "goal": "find evidence"},
+        "facts": [
+            {"id": "source", "status": "verified", "description": "s" * 5_000},
+            {"id": "other", "status": "verified", "description": "o" * 5_000},
+        ],
+        "intents": [{"from": ["source"], "to": None, "description": "history " * 500}],
+    }
+    full_yaml = yaml.safe_dump(graph)
+
+    reference = write_explore_graph_reference(
+        containers, "worker", full_yaml, phase="explore_execute", source_fact_ids=["source"]
+    )
+
+    written = {path: content for _, path, content in containers.writes}
+    overview_path = next(path for path in written if path.endswith("/overview.yaml"))
+    overview = yaml.safe_load(written[overview_path])
+    assert len(written[overview_path]) < len(full_yaml) // 4
+    assert overview["current_intent_source_fact_ids"] == ["source"]
+    assert len(overview["facts"][0]["description"]) > len(overview["facts"][1]["description"])
+    assert yaml.safe_load(written[overview["facts"][0]["detail_path"]])["description"] == "s" * 5_000
+    assert written[next(path for path in written if path.endswith("/graph.yaml"))] == full_yaml
+    assert overview_path in reference
 
 
 def test_explore_healthcheck_failure_releases_claim(monkeypatch) -> None:
